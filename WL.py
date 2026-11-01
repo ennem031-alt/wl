@@ -10,11 +10,13 @@ in the same folder as config.json and value_list.txt.
 
 import asyncio
 import math
+import os
 import sys
 import time
 from datetime import datetime, timezone
 
 import aiohttp
+from aiohttp import web
 import discord
 from discord.ext import commands, tasks
 
@@ -647,9 +649,32 @@ async def forget_cmd(ctx):
 # ============================================================
 #  EVENTS
 # ============================================================
+HEALTH_STATE = {"started": False}
+
+
+async def _health(request):
+    return web.Response(text="AA Trade Evaluator is running")
+
+
+async def start_health_server():
+    """Listen on Render's PORT so the service is recognized as a running web service."""
+    if HEALTH_STATE["started"]:
+        return
+    port = int(os.environ.get("PORT", "10000"))
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    HEALTH_STATE["started"] = True
+    print(f"[HEALTH] Listening on port {port}")
+
+
 @bot.event
 async def on_ready():
     print(f"[READY] Logged in as {bot.user}")
+    await start_health_server()
     await asyncio.to_thread(mem.init)
     await asyncio.to_thread(ai.init_ai)
     await asyncio.to_thread(core.load_value_list)
