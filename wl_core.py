@@ -27,6 +27,7 @@ DB_FILE = os.path.join(DATA_DIR, "values_db.json")
 VALUE_LIST_FILE = os.path.join(BASE_DIR, "value_list.txt")
 
 BOT_TOKEN = ""
+USER_TOKEN = ""  # <--- BAGONG DAGDAG PARA SA USER TOKEN
 HISTORY_AUTH = ""
 VALUE_CHANNEL_ID = 0
 
@@ -37,7 +38,7 @@ def load_config():
     config.json is only a fallback for running on your own PC.
     Secrets are never stored in the code.
     """
-    global BOT_TOKEN, HISTORY_AUTH, VALUE_CHANNEL_ID
+    global BOT_TOKEN, USER_TOKEN, HISTORY_AUTH, VALUE_CHANNEL_ID
     cfg = {}
     if os.path.exists(CONFIG_FILE):
         try:
@@ -47,6 +48,8 @@ def load_config():
             sys.exit(f"[FATAL] Could not read config.json: {e}")
 
     BOT_TOKEN = (os.environ.get("BOT_TOKEN") or cfg.get("bot_token", "")).strip()
+    USER_TOKEN = (os.environ.get("USER_TOKEN") or cfg.get("user_token", "")).strip() # <--- BINABASA NA ANG USER TOKEN
+    
     channel = os.environ.get("VALUE_CHANNEL_ID") or cfg.get("value_channel_id", "0")
     try:
         VALUE_CHANNEL_ID = int(str(channel).strip())
@@ -56,8 +59,15 @@ def load_config():
     if not BOT_TOKEN:
         sys.exit("[FATAL] BOT_TOKEN is not set. Add it as an environment variable or in config.json.")
 
-    # History is read with the bot account only. User tokens are not supported.
-    HISTORY_AUTH = f"Bot {BOT_TOKEN}"
+    # Logic para pumili kung User Token o Bot Token ang gagamitin sa history
+    use_bot_for_history = str(os.environ.get("USE_BOT_TOKEN_FOR_HISTORY", "false")).lower() == "true" or cfg.get("use_bot_token_for_history", False)
+    
+    if USER_TOKEN and not use_bot_for_history:
+        HISTORY_AUTH = USER_TOKEN
+        print("[INFO] Using USER_TOKEN for reading channel history.")
+    else:
+        HISTORY_AUTH = f"Bot {BOT_TOKEN}"
+        print("[INFO] Using BOT_TOKEN for reading channel history.")
 
 
 # ============================================================
