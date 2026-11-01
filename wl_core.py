@@ -21,7 +21,9 @@ from datetime import datetime
 # ============================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-DB_FILE = os.path.join(BASE_DIR, "values_db.json")
+DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "values_db.json")
 VALUE_LIST_FILE = os.path.join(BASE_DIR, "value_list.txt")
 
 BOT_TOKEN = ""
@@ -30,23 +32,32 @@ VALUE_CHANNEL_ID = 0
 
 
 def load_config():
-    """Read config.json into the module settings."""
+    """
+    Read settings from environment variables first (used on Render).
+    config.json is only a fallback for running on your own PC.
+    Secrets are never stored in the code.
+    """
     global BOT_TOKEN, HISTORY_AUTH, VALUE_CHANNEL_ID
-    if not os.path.exists(CONFIG_FILE):
-        sys.exit(f"[FATAL] Missing {CONFIG_FILE}")
+    cfg = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as e:
+            sys.exit(f"[FATAL] Could not read config.json: {e}")
+
+    BOT_TOKEN = (os.environ.get("BOT_TOKEN") or cfg.get("bot_token", "")).strip()
+    channel = os.environ.get("VALUE_CHANNEL_ID") or cfg.get("value_channel_id", "0")
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        BOT_TOKEN = str(cfg.get("bot_token", "")).strip()
-        user_token = str(cfg.get("user_token", "")).strip()
-        VALUE_CHANNEL_ID = int(str(cfg.get("value_channel_id", "0")).strip())
-        # Recommended: set "use_bot_token_for_history": true and invite the bot to the channel
-        if cfg.get("use_bot_token_for_history"):
-            HISTORY_AUTH = f"Bot {BOT_TOKEN}"
-        else:
-            HISTORY_AUTH = user_token
-    except Exception as e:
-        sys.exit(f"[FATAL] Could not read config.json: {e}")
+        VALUE_CHANNEL_ID = int(str(channel).strip())
+    except ValueError:
+        sys.exit("[FATAL] VALUE_CHANNEL_ID must be a number.")
+
+    if not BOT_TOKEN:
+        sys.exit("[FATAL] BOT_TOKEN is not set. Add it as an environment variable or in config.json.")
+
+    # History is read with the bot account only. User tokens are not supported.
+    HISTORY_AUTH = f"Bot {BOT_TOKEN}"
 
 
 # ============================================================
