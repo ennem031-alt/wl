@@ -1,0 +1,25 @@
+# Render Blueprint: runs the Discord bot as a background worker.
+# Secrets (BOT_TOKEN, VALUE_CHANNEL_ID) are entered in the Render dashboard
+# under Environment. They are never stored in this file or in GitHub.
+
+services:
+  - type: worker
+    name: aa-wl-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python WL.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: BOT_TOKEN
+        sync: false
+      - key: VALUE_CHANNEL_ID
+        sync: false
+      # Optional: uncomment together with the disk below so the database survives restarts.
+      # - key: DATA_DIR
+      #   value: /var/data
+    # Optional persistent disk (requires a paid plan):
+    # disk:
+    #   name: aa-wl-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

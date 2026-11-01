@@ -1,0 +1,13 @@
+# Secrets and local settings
+config.json
+.env
+
+# Personal data (Discord user IDs and chat history)
+values_db.json
+values_db.old.json
+values_db.json.tmp
+*.db
+
+# Python cache
+__pycache__/
+*.pyc
