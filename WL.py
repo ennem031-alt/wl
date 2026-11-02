@@ -1,16 +1,14 @@
 """
-AA Trade Evaluator - Discord interface (v3).
+AA Trade Evaluator - Discord interface (v4).
 
 Run:  python WL.py
 
 Logic lives in wl_core.py (parsing, value list, trade history, value model)
 and wl_memory.py (per-user memory and crowd consensus). wl_ai.py is optional.
 
-How updates work now:
-  - New W/L posts and 👍/👎 reactions arrive through the Discord gateway in real
-    time. No polling is needed, which means fewer API calls.
-  - Every 10 minutes, one request refreshes the latest 100 messages. This keeps
-    reaction counts accurate after a restart.
+How updates work:
+  - New W/L posts and 👍/👎 reactions arrive through the Discord gateway in real time.
+  - Every 10 minutes, one request refreshes the latest 100 messages.
   - Changes are saved in batches (every 20 seconds if anything changed).
 """
 
@@ -119,6 +117,33 @@ def base_embed(title, color, description=None):
     return embed
 
 
+def add_fixes(embed, fixes):
+    """Show what the bot auto-corrected, so a wrong correction is easy to spot."""
+    if fixes:
+        value = ", ".join(f"`{b}` → `{a}`" for b, a in fixes)[:1024]
+        embed.add_field(name="Auto-corrected", value=value, inline=False)
+    return embed
+
+
+def typo_fixes(text):
+    """
+    Words in the user's message that were corrected, as [(typed, fixed), ...].
+    Uses the same cleaning as split_sides so 'is', 'for', 'my' and 'win or lose'
+    are not compared against the vocabulary.
+    """
+    s = core.clean(text.lower().replace("?", " "))
+    s = core.COMMAND_PREFIX_RE.sub("", s)
+    s = core.WIN_LOSE_RE.sub("", s)
+    fixes, seen = [], set()
+    for seg in core.SIDE_SPLIT_RE.split(s):
+        for w in core.norm_key(core.MY_RE.sub("", seg)).split():
+            fixed = core.fix_token(w)
+            if fixed != w and (w, fixed) not in seen:
+                seen.add((w, fixed))
+                fixes.append((w, fixed))
+    return fixes
+
+
 # ============================================================
 #  EMBEDS
 # ============================================================
@@ -135,7 +160,7 @@ def usage_embed():
         "**Other**\n"
         "`swap` reverses your last trade\n\n"
         "**Commands**\n"
-        "`!help`  •  `!values`  •  `!backtest`  •  `!start scanning`  •  `!stop scanning`\n"
+        "`!help`  •  `!values`  •  `!backtest`  •  `!pending`  •  `!start scanning`  •  `!stop scanning`\n"
         "`!deepscan [number]`  •  `!setup`  •  `!forget` (DM only)"
     )
     return base_embed(f"{emo('trade')} How to use", COLOR_INFO, desc)
@@ -308,10 +333,10 @@ def fully_resolved(uid, text):
     plain = core.clean(text.lower()).strip(" !.?")
     if plain in SWAP_WORDS:
         return True
-    parsed = core.split_sides(text)
+    lookup = make_choice_lookup(uid)
+    parsed = core.split_sides(text, lookup)
     if not parsed:
         return False
-    lookup = make_choice_lookup(uid)
     return all(core.resolve_query(q, lookup)[0] == "ok" for q in parsed[0] + parsed[1])
 
 
@@ -329,12 +354,12 @@ def build_answer(uid, text, log=True):
                               "Evaluate a trade first, then send `swap` to see it reversed."), None
         return trade_embed(last["get"], last["give"]), None
 
-    parsed = core.split_sides(text)
+    lookup = make_choice_lookup(uid)
+    parsed = core.split_sides(text, lookup)
     if not parsed:
         return usage_embed(), None
 
     give_raw, get_raw = parsed
-    lookup = make_choice_lookup(uid)
     give, get, unknown = [], [], []
     for raw, bucket in ((give_raw, give), (get_raw, get)):
         for q in raw:
@@ -349,15 +374,17 @@ def build_answer(uid, text, log=True):
         view = ChoiceView(uid, first[0], text, first[3]) if first[3] else None
         return unknown_embed(unknown), view
 
+    fixes = typo_fixes(text)
+
     if not get:
         if log:
             mem.log_items(uid, give)
-        return items_embed(give, uid), None
+        return add_fixes(items_embed(give, uid), fixes), None
 
     if log:
         mem.log_items(uid, give + get)
         mem.set_last_trade(uid, give, get)
-    return trade_embed(give, get), None
+    return add_fixes(trade_embed(give, get), fixes), None
 
 
 class ChoiceView(discord.ui.View):
@@ -408,7 +435,6 @@ async def fetch_messages(limit=100, before_id=None):
                         await asyncio.sleep(float(r.headers.get("Retry-After", 5)))
                     elif r.status in (401, 403):
                         AUTH_STATE["failed"] = True
-                        # Binago ang log para malaman kung user token o bot token ang may problema
                         print(f"[ERROR] Discord returned {r.status}. Check your HISTORY_AUTH (BOT_TOKEN or USER_TOKEN) "
                               "and the permissions in the W/L channel. Background updates stopped.")
                         break
@@ -540,7 +566,7 @@ async def run_scan(ctx, limit=None):
 # ============================================================
 @tasks.loop(seconds=20)
 async def flush_loop():
-    """Save and refit in batches when something changed. Replaces per-message saving."""
+    """Save and refit in batches when something changed."""
     if core.is_dirty():
         await asyncio.to_thread(core.flush)
 
@@ -714,6 +740,22 @@ async def backtest_cmd(ctx):
     await ctx.reply(embed=embed)
 
 
+@bot.command(name="pending")
+async def pending_cmd(ctx):
+    """Units seen in chat that are not in value_list.txt, most frequent first."""
+    if not channel_allowed(ctx):
+        return await ctx.reply("Run this command in the W/L channel or in DM.")
+    rows = core.top_pending(20)
+    if not rows:
+        return await ctx.reply(embed=base_embed(
+            f"{emo('verified')} No pending units", COLOR_WIN,
+            "Every unit seen in chat is already in the value list."))
+    lines = [f"`{i + 1:>2}.` **{name}**  —  {count}×" for i, (name, count) in enumerate(rows)]
+    await ctx.reply(embed=base_embed(
+        f"{emo('exclaim')} Pending units", COLOR_WARN,
+        "These are not in `value_list.txt` yet. Add the frequent ones to the list.\n\n" + "\n".join(lines)))
+
+
 @bot.command(name="setup")
 async def setup_cmd(ctx):
     """Read-only status check. Secrets are never accepted or shown in chat."""
@@ -770,7 +812,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Channel messages: live capture of new W/L posts, no polling needed
+    # Channel messages: live capture of new W/L posts
     if message.guild is not None:
         if message.channel.id == core.VALUE_CHANNEL_ID and message.content.lower().startswith("!wl"):
             await asyncio.to_thread(core.ingest, [live_message(message)], False)
@@ -797,7 +839,6 @@ async def on_message(message):
         embed = trade_embed(*trade) if trade else None
         return await message.reply(content=reply[:1900], embed=embed)
 
-    # Show a placeholder right away, then replace it with the answer
     calc = await message.reply(embed=base_embed(
         f"{emo('loading')} Calculating...", COLOR_INFO,
         "Checking the value list and trade history."))
