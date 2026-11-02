@@ -1,11 +1,17 @@
 """
-AA Trade Evaluator - Discord interface.
+AA Trade Evaluator - Discord interface (v3).
 
 Run:  python WL.py
 
 Logic lives in wl_core.py (parsing, value list, trade history, value model)
-and wl_memory.py (per-user memory and crowd consensus). Keep all four files
-in the same folder as config.json and value_list.txt.
+and wl_memory.py (per-user memory and crowd consensus). wl_ai.py is optional.
+
+How updates work now:
+  - New W/L posts and 👍/👎 reactions arrive through the Discord gateway in real
+    time. No polling is needed, which means fewer API calls.
+  - Every 10 minutes, one request refreshes the latest 100 messages. This keeps
+    reaction counts accurate after a restart.
+  - Changes are saved in batches (every 20 seconds if anything changed).
 """
 
 import asyncio
@@ -16,8 +22,8 @@ import time
 from datetime import datetime, timezone
 
 import aiohttp
-from aiohttp import web
 import discord
+from aiohttp import web
 from discord.ext import commands, tasks
 
 import wl_core as core
@@ -37,6 +43,7 @@ COLOR_NEUTRAL = 0x95A5A6
 GREETINGS = {"hi", "hello", "hey", "yo", "hi bot", "hello bot", "good morning",
              "good afternoon", "good evening", "kumusta", "musta"}
 SWAP_WORDS = {"swap", "reverse", "flip", "baliktad", "baligtad"}
+VALUES_PAGE_SIZE = 20
 
 # key: (unicode fallback, custom emoji ID)
 # A custom emoji is used only if the bot can see it (it must share a server with it).
@@ -56,7 +63,13 @@ EMOJI_DEF = {
 intents = discord.Intents.default()
 intents.message_content = True
 intents.dm_messages = True
+intents.guild_messages = True
+intents.guild_reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+SCAN_STATE = {"running": False, "stop": False}
+AUTH_STATE = {"failed": False}
+HEALTH_STATE = {"started": False}
 
 
 def emo(key):
@@ -69,7 +82,7 @@ def emo(key):
 
 
 # ============================================================
-#  EMBED HELPERS
+#  FORMAT HELPERS
 # ============================================================
 def fmt_value(v):
     return f"{v:,.0f}" if v >= 10 else f"{v:.1f}"
@@ -91,7 +104,7 @@ def fmt_duration(sec):
 
 
 def confidence(items):
-    score = min(core.VOTE_COUNT.get(i, 0) + (6 if i in core.LIST_VALUE else 0) for i in items)
+    score = min(core.vote_count_of(i) + (6 if i in core.LIST_VALUE else 0) for i in items)
     if score < core.MIN_VOTES:
         return f"{emo('offline')} Low"
     if score < 10:
@@ -106,18 +119,24 @@ def base_embed(title, color, description=None):
     return embed
 
 
+# ============================================================
+#  EMBEDS
+# ============================================================
 def usage_embed():
     desc = (
         "**Evaluate a trade**\n"
         "`is [item A] for [item B] win or lose`\n"
         "Put `my` before the unit you are giving. It can be on either side:\n"
         "`is Gohan for my Goku`\n\n"
+        "**Units with stats**\n"
+        "`is dark mage with sss damage and sss range for shiny cream`\n\n"
         "**Look up one item**\n"
         "`what is shiny sakamoto`  or  `ano value ni dio`\n\n"
         "**Other**\n"
         "`swap` reverses your last trade\n\n"
         "**Commands**\n"
-        "`!help`  •  `!backtest`  •  `!forget` (DM only)"
+        "`!help`  •  `!values`  •  `!backtest`  •  `!start scanning`  •  `!stop scanning`\n"
+        "`!deepscan [number]`  •  `!setup`  •  `!forget` (DM only)"
     )
     return base_embed(f"{emo('trade')} How to use", COLOR_INFO, desc)
 
@@ -152,16 +171,30 @@ def unknown_embed(unknown):
     return embed
 
 
+def unpriced_embed(items):
+    names = ", ".join(f"`{core.display_name(i)}`" for i in items)
+    return base_embed(
+        f"{emo('exclaim')} Cannot price this trade yet", COLOR_WARN,
+        f"No price was found for: {names}\n\n"
+        "These units are not in `value_list.txt` and have no community votes yet, so any number "
+        "would be a guess. Add the unit to the value list, or wait until trades with it are posted "
+        "and voted on in the channel.")
+
+
 def items_embed(items, uid=None):
-    lines, total = [], 0.0
+    lines, total, priced_all = [], 0.0, True
     for i in items:
-        v = core.value_of(i)
-        total += v
-        lines.append(f"• `{core.display_name(i)}`  —  **{fmt_value(v)}**  _({core.source_label(i)})_")
+        if core.priced(i):
+            v = core.value_of(i)
+            total += v
+            lines.append(f"• `{core.display_name(i)}`  —  **{fmt_value(v)}**  _({core.source_label(i)})_")
+        else:
+            priced_all = False
+            lines.append(f"• `{core.display_name(i)}`  —  _no price yet_")
     embed = base_embed(f"{emo('trade')} Item Value", COLOR_INFO, "\n".join(lines))
-    if len(items) > 1:
+    if len(items) > 1 and priced_all:
         embed.add_field(name="Combined value", value=f"**{fmt_value(total)}**", inline=True)
-    votes = min(core.VOTE_COUNT.get(i, 0) for i in items)
+    votes = min(core.vote_count_of(i) for i in items)
     embed.add_field(name="Votes on record", value=str(votes), inline=True)
     embed.add_field(name="Confidence", value=confidence(items), inline=True)
     if uid:
@@ -175,6 +208,10 @@ def items_embed(items, uid=None):
 
 
 def trade_embed(give, get):
+    missing = [i for i in give + get if not core.priced(i)]
+    if missing:
+        return unpriced_embed(missing)
+
     give_values = [core.value_of(i) for i in give]
     get_values = [core.value_of(i) for i in get]
     give_total, get_total = sum(give_values), sum(get_values)
@@ -236,12 +273,14 @@ def trade_embed(give, get):
     embed.add_field(name="Community votes", value=vote_text, inline=False)
 
     notes = []
+    if any(i in core.COMPOSITE for i in give + get):
+        notes.append("Units with stats are priced as the unit plus each stat (estimate).")
     estimated = sorted({core.display_name(i) for i in give + get
                         if core.shiny_estimate(i) is not None and i not in core.VOTE_ITEMS})
     limited = sorted({core.display_name(i) for i in give + get
-                      if i not in core.LIST_VALUE and core.VOTE_COUNT.get(i, 0) < core.MIN_VOTES})
+                      if i not in core.LIST_VALUE and core.vote_count_of(i) < core.MIN_VOTES})
     if estimated:
-        notes.append("Estimated from the non-shiny price: " + ", ".join(estimated))
+        notes.append("Shiny estimate from the non-shiny price: " + ", ".join(estimated))
     if limited:
         notes.append("Limited data: " + ", ".join(limited))
     if notes:
@@ -265,7 +304,7 @@ def make_choice_lookup(uid):
 
 
 def fully_resolved(uid, text):
-    """True when the message is a trade or lookup the calculator can answer on its own."""
+    """True when the calculator can answer on its own (no AI needed)."""
     plain = core.clean(text.lower()).strip(" !.?")
     if plain in SWAP_WORDS:
         return True
@@ -346,13 +385,13 @@ class ChoiceView(discord.ui.View):
 
 
 # ============================================================
-#  CHANNEL HISTORY AND SCANNING
+#  CHANNEL HISTORY (uses HISTORY_AUTH - can be USER_TOKEN or BOT_TOKEN)
 # ============================================================
 async def fetch_messages(limit=100, before_id=None):
     headers = {"Authorization": core.HISTORY_AUTH}
     out, last = [], before_id
     async with aiohttp.ClientSession(headers=headers) as session:
-        while len(out) < limit:
+        while len(out) < limit and not AUTH_STATE["failed"]:
             url = f"https://discord.com/api/v9/channels/{core.VALUE_CHANNEL_ID}/messages?limit=100"
             if last:
                 url += f"&before={last}"
@@ -364,13 +403,14 @@ async def fetch_messages(limit=100, before_id=None):
                             break
                         out.extend(batch)
                         last = batch[-1]["id"]
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.4)
                     elif r.status == 429:
                         await asyncio.sleep(float(r.headers.get("Retry-After", 5)))
                     elif r.status in (401, 403):
                         AUTH_STATE["failed"] = True
-                        print(f"[ERROR] Discord returned {r.status}. Check BOT_TOKEN and the bot's "
-                              "permissions in the W/L channel. Background sync stopped.")
+                        # Binago ang log para malaman kung user token o bot token ang may problema
+                        print(f"[ERROR] Discord returned {r.status}. Check your HISTORY_AUTH (BOT_TOKEN or USER_TOKEN) "
+                              "and the permissions in the W/L channel. Background updates stopped.")
                         break
                     else:
                         break
@@ -379,20 +419,32 @@ async def fetch_messages(limit=100, before_id=None):
     return out[:limit]
 
 
-SCAN_STATE = {"running": False}
-AUTH_STATE = {"failed": False}
+def live_message(m):
+    """Convert a gateway message into the same shape the history API returns."""
+    return {
+        "id": str(m.id),
+        "content": m.content,
+        "timestamp": m.created_at.isoformat(),
+        "author": {"id": str(m.author.id)},
+    }
 
 
+# ============================================================
+#  SCANNING
+# ============================================================
 def scan_embed(st, running, error=None):
     if error:
         return base_embed(f"{emo('offline')} Scan failed", COLOR_NEUTRAL, f"```{error[:300]}```")
 
     if running:
         embed = base_embed(f"{emo('loading')} Scanning channel history", COLOR_INFO,
-                           "Reading the channel. This can take a while on large histories.")
+                           "Reading the channel. Use `!stop scanning` to stop early; progress is kept.")
+    elif st.get("stopped"):
+        embed = base_embed(f"{emo('exclaim')} Scan stopped", COLOR_WARN,
+                           "Stopped on request. Everything read so far is saved.")
     else:
         embed = base_embed(f"{emo('verified')} Scan complete", COLOR_WIN,
-                           "The model is up to date. You can now send trade queries in DM.")
+                           "The database is up to date. Live updates are active.")
 
     elapsed = time.monotonic() - st["started"]
     embed.add_field(name="Messages scanned", value=f"{st['scanned']:,}", inline=True)
@@ -422,19 +474,26 @@ def channel_allowed(ctx):
 
 
 async def run_scan(ctx, limit=None):
-    """Scan channel history (all of it, or up to `limit` messages) and rebuild the database."""
+    """Scan channel history (all of it, or up to `limit` messages). Can be stopped."""
     if SCAN_STATE["running"]:
-        return await ctx.reply("A scan is already running. Please wait for it to finish.")
+        return await ctx.reply("A scan is already running. Use `!stop scanning` to stop it.")
 
     SCAN_STATE["running"] = True
+    SCAN_STATE["stop"] = False
     st = {"scanned": 0, "posts": 0, "saved": 0, "newest": None, "oldest": None,
-          "started": time.monotonic()}
+          "started": time.monotonic(), "stopped": False}
     status = await ctx.reply(embed=scan_embed(st, running=True))
     print("[SCAN] Started")
 
-    last_id, buffer, last_edit = None, [], 0.0
+    last_id, buffer, last_edit, since_flush = None, [], 0.0, 0
     try:
         while limit is None or st["scanned"] < limit:
+            if SCAN_STATE["stop"]:
+                st["stopped"] = True
+                break
+            if AUTH_STATE["failed"]:
+                break
+
             want = 100 if limit is None else min(100, limit - st["scanned"])
             batch = await fetch_messages(limit=want, before_id=last_id)
             if not batch:
@@ -453,7 +512,11 @@ async def run_scan(ctx, limit=None):
 
             if len(buffer) >= 500:
                 st["saved"] += await asyncio.to_thread(core.ingest, buffer, False)
+                since_flush += len(buffer)
                 buffer = []
+                if since_flush >= 20000:
+                    await asyncio.to_thread(core.flush)
+                    since_flush = 0
 
             if time.monotonic() - last_edit >= 3:
                 last_edit = time.monotonic()
@@ -461,95 +524,63 @@ async def run_scan(ctx, limit=None):
 
         if buffer:
             st["saved"] += await asyncio.to_thread(core.ingest, buffer, False)
-        await asyncio.to_thread(core.recalculate)
+        await asyncio.to_thread(core.flush)
         await safe_edit(status, scan_embed(st, running=False))
-        print(f"[SCAN] Done. {len(core.TRADE_DB)} trades in database.")
+        print(f"[SCAN] Finished. {len(core.TRADE_DB)} trades in database.")
     except Exception as e:
         print(f"[SCAN] Error: {e}")
         await safe_edit(status, scan_embed(st, running=False, error=str(e)))
     finally:
         SCAN_STATE["running"] = False
+        SCAN_STATE["stop"] = False
 
 
 # ============================================================
-#  BACKGROUND SYNC
+#  BACKGROUND TASKS
 # ============================================================
-@tasks.loop(seconds=30)
-async def sync_new_messages():
+@tasks.loop(seconds=20)
+async def flush_loop():
+    """Save and refit in batches when something changed. Replaces per-message saving."""
+    if core.is_dirty():
+        await asyncio.to_thread(core.flush)
+
+
+@tasks.loop(minutes=10)
+async def refresh_loop():
+    """One request every 10 minutes: refreshes reaction counts of the latest messages."""
     if AUTH_STATE["failed"]:
-        sync_new_messages.cancel()
+        refresh_loop.cancel()
         return
     messages = await fetch_messages(limit=100)
     if messages:
-        await asyncio.to_thread(core.ingest, messages)
-
-
-@tasks.loop(minutes=5)
-async def sync_recent_votes():
-    if AUTH_STATE["failed"]:
-        sync_recent_votes.cancel()
-        return
-    messages = await fetch_messages(limit=300)
-    if messages:
-        await asyncio.to_thread(core.ingest, messages)
+        await asyncio.to_thread(core.ingest, messages, False)
 
 
 # ============================================================
-#  COMMANDS
+#  HEALTH SERVER (for Render web service)
 # ============================================================
-@bot.command(name="help")
-async def help_cmd(ctx):
-    await ctx.reply(embed=usage_embed())
+async def _health(request):
+    return web.Response(text="AA Trade Evaluator is running")
 
 
-@bot.command(name="start")
-async def start_cmd(ctx, *, what: str = ""):
-    if what.strip().lower() != "scanning":
+async def start_health_server():
+    """Listen on Render's PORT so the web service is recognized as running."""
+    if HEALTH_STATE["started"]:
         return
-    if not channel_allowed(ctx):
-        return await ctx.reply("Run this command in the W/L channel or in DM.")
-    await run_scan(ctx, limit=None)
+    port = int(os.environ.get("PORT", "10000"))
+    app = web.Application()
+    app.router.add_get("/", _health)
+    app.router.add_get("/health", _health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    HEALTH_STATE["started"] = True
+    print(f"[HEALTH] Listening on port {port}")
 
 
-@bot.command(name="deepscan")
-async def deepscan_cmd(ctx, limit: int = 5000):
-    if not channel_allowed(ctx):
-        return await ctx.reply("Run this command in the W/L channel or in DM.")
-    limit = max(100, min(limit, 50000))
-    await run_scan(ctx, limit=limit)
-
-
-@bot.command(name="backtest")
-async def backtest_cmd(ctx):
-    if not channel_allowed(ctx):
-        return await ctx.reply("Run this command in the W/L channel or in DM.")
-    result = await asyncio.to_thread(core.backtest)
-    if result is None:
-        return await ctx.reply(embed=base_embed(
-            f"{emo('exclaim')} Not enough data", COLOR_WARN,
-            "At least 20 voted trades are needed to run a backtest."))
-
-    beat = result["accuracy"] > result["baseline"]
-    embed = base_embed(
-        f"{emo('trade')} Model Backtest", COLOR_WIN if beat else COLOR_WARN,
-        "Accuracy is measured on the **newest 20%** of voted trades. The model was trained only on "
-        "the older 80%, so this is an honest estimate of how it performs on new trades.")
-    embed.add_field(name="Trades tested", value=f"{result['tested']:,}", inline=True)
-    embed.add_field(name="Trained on", value=f"{result['trained_on']:,}", inline=True)
-    embed.add_field(name="Accuracy", value=f"**{result['accuracy'] * 100:.1f}%**", inline=True)
-    embed.add_field(name="Baseline (always pick the majority)",
-                    value=f"{result['baseline'] * 100:.1f}%", inline=True)
-    embed.add_field(name="Log loss (lower is better)", value=f"{result['logloss']:.3f}", inline=True)
-    if not beat:
-        embed.add_field(name=f"{emo('exclaim')} Warning",
-                        value="The model does not beat the baseline yet. Treat its verdicts with caution.",
-                        inline=False)
-    await ctx.reply(embed=embed)
-
-
-VALUES_PAGE_SIZE = 20
-
-
+# ============================================================
+#  VALUES LIST
+# ============================================================
 def values_pages(query=""):
     """Build the pages for !values, sorted from highest to lowest value."""
     q = query.strip().lower()
@@ -603,6 +634,44 @@ class ValuesView(discord.ui.View):
         await interaction.response.edit_message(embed=self.pages[self.index], view=self)
 
 
+# ============================================================
+#  COMMANDS
+# ============================================================
+@bot.command(name="help")
+async def help_cmd(ctx):
+    await ctx.reply(embed=usage_embed())
+
+
+@bot.command(name="start")
+async def start_cmd(ctx, *, what: str = ""):
+    if what.strip().lower() != "scanning":
+        return
+    if not channel_allowed(ctx):
+        return await ctx.reply("Run this command in the W/L channel or in DM.")
+    await run_scan(ctx, limit=None)
+
+
+@bot.command(name="stop")
+async def stop_cmd(ctx, *, what: str = ""):
+    if what.strip().lower() != "scanning":
+        return await ctx.reply("Usage: `!stop scanning`")
+    if not SCAN_STATE["running"]:
+        return await ctx.reply(embed=base_embed(
+            f"{emo('exclaim')} Nothing to stop", COLOR_WARN, "No scan is running right now."))
+    SCAN_STATE["stop"] = True
+    await ctx.reply(embed=base_embed(
+        f"{emo('loading')} Stopping scan", COLOR_INFO,
+        "The scan will stop after the current batch. Progress is saved."))
+
+
+@bot.command(name="deepscan")
+async def deepscan_cmd(ctx, limit: int = 5000):
+    if not channel_allowed(ctx):
+        return await ctx.reply("Run this command in the W/L channel or in DM.")
+    limit = max(100, min(limit, 50000))
+    await run_scan(ctx, limit=limit)
+
+
 @bot.command(name="values")
 async def values_cmd(ctx, *, query: str = ""):
     """!values            all units, highest value first
@@ -617,15 +686,45 @@ async def values_cmd(ctx, *, query: str = ""):
     await ctx.reply(embed=pages[0], view=view)
 
 
+@bot.command(name="backtest")
+async def backtest_cmd(ctx):
+    if not channel_allowed(ctx):
+        return await ctx.reply("Run this command in the W/L channel or in DM.")
+    result = await asyncio.to_thread(core.backtest)
+    if result is None:
+        return await ctx.reply(embed=base_embed(
+            f"{emo('exclaim')} Not enough data", COLOR_WARN,
+            "At least 20 voted trades are needed to run a backtest."))
+
+    beat = result["accuracy"] > result["baseline"]
+    embed = base_embed(
+        f"{emo('trade')} Model Backtest", COLOR_WIN if beat else COLOR_WARN,
+        "Accuracy is measured on the **newest 20%** of voted trades. The model was trained only on "
+        "the older 80%, so this is an honest estimate of how it performs on new trades.")
+    embed.add_field(name="Trades tested", value=f"{result['tested']:,}", inline=True)
+    embed.add_field(name="Trained on", value=f"{result['trained_on']:,}", inline=True)
+    embed.add_field(name="Accuracy", value=f"**{result['accuracy'] * 100:.1f}%**", inline=True)
+    embed.add_field(name="Baseline (always pick the majority)",
+                    value=f"{result['baseline'] * 100:.1f}%", inline=True)
+    embed.add_field(name="Log loss (lower is better)", value=f"{result['logloss']:.3f}", inline=True)
+    if not beat:
+        embed.add_field(name=f"{emo('exclaim')} Warning",
+                        value="The model does not beat the baseline yet. Treat its verdicts with caution.",
+                        inline=False)
+    await ctx.reply(embed=embed)
+
+
 @bot.command(name="setup")
 async def setup_cmd(ctx):
     """Read-only status check. Secrets are never accepted or shown in chat."""
     checks = [
         ("Bot token is set", bool(core.BOT_TOKEN)),
+        ("History Token is set", bool(core.HISTORY_AUTH)),
         ("Value channel ID is set", core.VALUE_CHANNEL_ID != 0),
         ("Value list loaded", bool(core.LIST_VALUE)),
         ("Trade database has data", bool(core.TRADE_DB)),
         ("Discord access is working", not AUTH_STATE["failed"]),
+        ("Live updates (new posts and votes)", bot.is_ready()),
         ("AI assistant (optional)", ai.enabled()),
     ]
     lines = [f"{emo('verified') if ok else emo('offline')} {label}" for label, ok in checks]
@@ -649,28 +748,6 @@ async def forget_cmd(ctx):
 # ============================================================
 #  EVENTS
 # ============================================================
-HEALTH_STATE = {"started": False}
-
-
-async def _health(request):
-    return web.Response(text="AA Trade Evaluator is running")
-
-
-async def start_health_server():
-    """Listen on Render's PORT so the service is recognized as a running web service."""
-    if HEALTH_STATE["started"]:
-        return
-    port = int(os.environ.get("PORT", "10000"))
-    app = web.Application()
-    app.router.add_get("/", _health)
-    app.router.add_get("/health", _health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()
-    HEALTH_STATE["started"] = True
-    print(f"[HEALTH] Listening on port {port}")
-
-
 @bot.event
 async def on_ready():
     print(f"[READY] Logged in as {bot.user}")
@@ -681,35 +758,82 @@ async def on_ready():
     await asyncio.to_thread(core.load_db)
     await asyncio.to_thread(core.recalculate)
     print(f"[READY] {len(core.TRADE_DB)} trades | {len(core.VALUES)} units priced")
-    if not sync_new_messages.is_running():
-        sync_new_messages.start()
-    if not sync_recent_votes.is_running():
-        sync_recent_votes.start()
+    print("[LIVE] Listening for new W/L posts and 👍/👎 reactions.")
+    if not flush_loop.is_running():
+        flush_loop.start()
+    if not refresh_loop.is_running():
+        refresh_loop.start()
 
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
+
+    # Channel messages: live capture of new W/L posts, no polling needed
+    if message.guild is not None:
+        if message.channel.id == core.VALUE_CHANNEL_ID and message.content.lower().startswith("!wl"):
+            await asyncio.to_thread(core.ingest, [live_message(message)], False)
+            return
+        if message.content.startswith(bot.command_prefix):
+            return await bot.process_commands(message)
+        return
+
+    # Direct messages
     if message.content.startswith(bot.command_prefix):
         return await bot.process_commands(message)
-    if isinstance(message.channel, discord.DMChannel):
-        uid = str(message.author.id)
-        text = message.content.strip()
-        if not text:
-            return
-        await asyncio.to_thread(mem.log_message, uid, text)
 
-        if text.lower().strip(" !.?") in GREETINGS:
-            return await message.reply(embed=greeting_embed())
+    uid = str(message.author.id)
+    text = message.content.strip()
+    if not text:
+        return
+    await asyncio.to_thread(mem.log_message, uid, text)
 
-        if ai.enabled() and not fully_resolved(uid, text):
-            reply, trade = await asyncio.to_thread(ai.chat, uid, text)
-            embed = trade_embed(*trade) if trade else None
-            return await message.reply(content=reply[:1900], embed=embed)
+    if text.lower().strip(" !.?") in GREETINGS:
+        return await message.reply(embed=greeting_embed())
 
+    if ai.enabled() and not fully_resolved(uid, text):
+        reply, trade = await asyncio.to_thread(ai.chat, uid, text)
+        embed = trade_embed(*trade) if trade else None
+        return await message.reply(content=reply[:1900], embed=embed)
+
+    # Show a placeholder right away, then replace it with the answer
+    calc = await message.reply(embed=base_embed(
+        f"{emo('loading')} Calculating...", COLOR_INFO,
+        "Checking the value list and trade history."))
+    try:
         embed, view = await asyncio.to_thread(build_answer, uid, text, True)
-        await message.reply(embed=embed, view=view)
+    except Exception as e:
+        print(f"[ERROR] build_answer failed: {e}")
+        embed = base_embed(f"{emo('exclaim')} Something went wrong", COLOR_WARN,
+                           "Please try again in a moment.")
+        view = None
+    await calc.edit(embed=embed, view=view)
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.channel_id != core.VALUE_CHANNEL_ID:
+        return
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    await asyncio.to_thread(core.bump_reaction, str(payload.message_id), payload.emoji.name, 1)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.channel_id != core.VALUE_CHANNEL_ID:
+        return
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    await asyncio.to_thread(core.bump_reaction, str(payload.message_id), payload.emoji.name, -1)
+
+
+@bot.event
+async def on_raw_message_delete(payload):
+    if payload.channel_id != core.VALUE_CHANNEL_ID:
+        return
+    await asyncio.to_thread(core.remove_trade, str(payload.message_id))
 
 
 # ============================================================
@@ -718,5 +842,5 @@ async def on_message(message):
 if __name__ == "__main__":
     core.load_config()
     if not core.BOT_TOKEN:
-        sys.exit("[FATAL] bot_token is missing in config.json")
+        sys.exit("[FATAL] BOT_TOKEN is missing.")
     bot.run(core.BOT_TOKEN)
