@@ -1,19 +1,20 @@
 """
-AA Trade Evaluator - core logic (v5).
+AA Trade Evaluator - core logic (v7).
 
 Independent of Discord: configuration, text parsing, value list, trade history,
 and the value model.
 
 Key ideas:
-  - Only the bot token is used. User tokens are not supported.
+  - Prices come from value_list.txt first. Units that are not listed can get an
+    estimate from community votes, but only when they have enough votes, and the
+    estimate is bounded so it cannot explode.
   - Units can carry stats: "dark mage with sss dmg and sss rng" is the unit "dark mage"
     plus two stat parts. Its value is the sum of the parts.
-  - Stat words alone ("sss", "damage", "range") are never units. Trades that contain
-    them are rejected, and old junk is removed from the database at startup.
+  - Filler words ("value", "what", "ano"), stat words alone, and "evo"/"unevo" alone
+    are never units. Chat noise ("overpaying", "or any") is never a unit either.
   - "evo" and "unevo" are part of the unit name. An evo unit is priced separately.
   - Typos are corrected only against the value list vocabulary, never against chat.
-  - Unknown units are kept so the community votes can price them. They are also
-    logged in pending_units.json for review.
+  - Unit-like names that are not priced are logged in pending_units.json for review.
   - Percent values are stripped from names. They are not used in prices yet.
   - Saves and refits are batched ("dirty" flag).
 """
@@ -76,23 +77,33 @@ def load_config():
 #  TUNING
 # ============================================================
 BETA = 2.0
-LAM_LIST = 12.0
-LAM_EST = 3.0
-LAM_DEFAULT = 0.1
+LAM_LIST = 12.0          # anchor strength for value-list units
+LAM_EST = 3.0            # anchor strength for shiny estimates
+LAM_UNLISTED = 1.0       # anchor strength for units that are not listed (votes must work hard)
+CLAMP_FACTOR = 20.0      # unlisted estimates stay within median / 20 .. median * 20
 ITERATIONS = 30
 HALF_LIFE_DAYS = 60.0
 FAIR_BAND = 0.07
-MIN_VOTES = 3
+MIN_VOTES = 3            # votes needed before a unit that is not listed gets a price
 SHINY_MULT_DEFAULT = 2.0
 TYPO_CUTOFF = 0.8
 TYPO_MARGIN = 0.05
 MIN_TYPO_LEN = 3
+MIN_NAME_LEN = 4         # shortest unit name that is logged as pending
 
 FILLER_WORDS = {
     "what", "whats", "is", "are", "the", "of", "a", "an", "how", "much",
     "ano", "anong", "ni", "ng", "sa", "si", "ba", "po", "pa", "yung", "yong",
     "magkano", "kay", "para", "value", "values", "price", "worth", "check",
     "tell", "me", "current", "now",
+}
+
+# Common chat words that are never unit names. Used to keep noise out of pending and votes.
+CHAT_NOISE = {
+    "or", "any", "and", "for", "my", "win", "lose", "is", "what", "value",
+    "price", "trade", "trading", "tradin", "offer", "offe", "overpaying", "screenshare",
+    "high", "triple", "low", "fair", "pay", "paying", "sure", "yes", "no", "ok",
+    "lol", "pls", "please", "bro", "sir", "ty", "thanks", "check",
 }
 
 # ============================================================
@@ -318,14 +329,10 @@ def display_name(canonical):
     return DISPLAY.get(canonical, canonical.title())
 
 
-def is_known(name):
-    return name in LIST_VALUE or name in VOTE_ITEMS or shiny_estimate(name) is not None
-
-
 def is_junk(name):
     """
-    True when a name is only stat words ('sss', 'damage', 'range') and is not a real unit.
-    Composite items are junk if any of their parts is junk.
+    True when a name is not a unit at all: only stat words, filler words, evo words,
+    or 'shiny'. Composite items are junk if any of their parts is junk.
     """
     if not name:
         return True
@@ -334,13 +341,47 @@ def is_junk(name):
     if name in LIST_VALUE:
         return False
     toks = name.replace(" shiny", "").split()
-    return not toks or all(t in STAT_TOKENS for t in toks)
+    return not toks or all(
+        t in STAT_TOKENS or t in FILLER_WORDS or t in EVO_WORDS or t == "shiny"
+        for t in toks)
+
+
+def is_unitlike(name):
+    """
+    A name that could plausibly be a unit. Listed units always pass. Unlisted names must
+    be long enough, short in word count, and free of chat noise and stat or evo words.
+    """
+    if not name or is_junk(name):
+        return False
+    if name in COMPOSITE:
+        return all(is_unitlike(p) for p in COMPOSITE[name])
+    if name in LIST_VALUE:
+        return True
+    base = name.replace(" shiny", "")
+    toks = base.split()
+    if len(base) < MIN_NAME_LEN or len(toks) > 4:
+        return False
+    for t in toks:
+        if t.isdigit() or t in CHAT_NOISE or t in FILLER_WORDS or t in STAT_TOKENS:
+            return False
+    return True
+
+
+def is_known(name):
+    """
+    A unit the bot can price: in the value list, a shiny estimate from it, or an unlisted
+    unit with enough votes to have a fitted estimate.
+    """
+    if name in LIST_VALUE or shiny_estimate(name) is not None:
+        return True
+    return (name in VALUES and VOTE_COUNT.get(name, 0) >= MIN_VOTES
+            and is_unitlike(name))
 
 
 def priced(name):
     if name in COMPOSITE:
         return all(priced(p) for p in COMPOSITE[name])
-    return name in LIST_VALUE or name in VOTE_ITEMS or shiny_estimate(name) is not None
+    return is_known(name)
 
 
 def build_composite(base_key, stat_keys):
@@ -361,7 +402,9 @@ def build_composite(base_key, stat_keys):
 
 
 def note_pending(name):
-    """Count a unit seen in chat that the value list does not know. Reviewed later."""
+    """Count a unit-like name the bot cannot price yet. Reviewed with !pending."""
+    if not is_unitlike(name):
+        return
     with DATA_LOCK:
         PENDING[name] += 1
 
@@ -376,8 +419,10 @@ def load_pending():
         return
     try:
         with open(PENDING_FILE, "r", encoding="utf-8") as f:
-            with DATA_LOCK:
-                PENDING.update(json.load(f))
+            data = json.load(f)
+        with DATA_LOCK:
+            # Drop noise that older versions may have logged.
+            PENDING.update({k: v for k, v in data.items() if is_unitlike(k)})
     except Exception as e:
         print(f"[WARN] Could not read pending_units.json: {e}")
 
@@ -406,7 +451,7 @@ def _resolve_for_ingest(key):
 def canon_ingest(raw):
     """
     Map a name from chat to a canonical item. Returns None for empty or ambiguous names.
-    Unknown names are kept so votes can price them. Pending tracking is done by parse_trade.
+    Unknown names are kept as-is so votes can still be recorded.
     """
     key = fix_typos(norm_key(raw))
     if not key:
@@ -421,7 +466,7 @@ def canon_ingest(raw):
 def parse_trade(content, track=False):
     """
     Parse a W/L post. Returns (offered, requested) or None. A trade is rejected when
-    any side is empty, ambiguous, or contains stat words with no unit (junk).
+    any side is empty, ambiguous, or contains junk (stat, filler, or evo words alone).
     """
     parsed = split_sides(content)
     if not parsed or not parsed[1]:
@@ -511,7 +556,10 @@ def segment(words, lookup=None, max_len=5):
 
 
 def split_items(text, lookup=None):
-    """Split one side of a trade into items, with or without commas."""
+    """
+    Split one side of a trade into items, with or without commas.
+    Filler words are removed first. A "shiny" anywhere in a part marks the unit in that part.
+    """
     # "dark mage with sss dmg and sss rng": the "and" joins stats, so keep them on the unit.
     text = AND_STAT_RE.sub(" with ", text)
     parts = re.split(r"\s+and\s+|\s*[+,&]\s*", text)
@@ -519,13 +567,20 @@ def split_items(text, lookup=None):
     for p in (clean(x) for x in parts):
         if not p:
             continue
-        words = fix_typos(norm_key(p)).split()
+        is_shiny = bool(SHINY_RE.search(p))
+        p = SHINY_RE.sub(" ", p)
+        words = [w for w in fix_typos(norm_key(p, shiny_aware=False)).split()
+                 if w not in FILLER_WORDS]
+        shiny_done = False
         for group in group_by_evo(words):
             for kind, chunk in segment(group, lookup):
                 if kind == "s" and out:
                     out[-1] = f"{out[-1]} with {chunk}"
-                else:
-                    out.append(chunk)
+                    continue
+                if is_shiny and not shiny_done and kind != "s":
+                    chunk = f"{chunk} shiny"
+                    shiny_done = True
+                out.append(chunk)
     return out
 
 
@@ -600,7 +655,7 @@ def suggest(key, n=4):
     if not tokens:
         return []
     want_shiny = key.endswith(" shiny")
-    pool = set(ALIAS_KEYS) | VOTE_ITEMS
+    pool = set(ALIAS_KEYS)
     scored = []
     for cand in pool:
         ctoks = {t for t in cand.split() if t != "shiny"}
@@ -628,14 +683,12 @@ def suggest(key, n=4):
 def source_label(name):
     if name in COMPOSITE:
         return "Unit + stats (sum of parts)"
-    if name in LIST_VALUE and name in VOTE_ITEMS:
-        return "List + votes"
     if name in LIST_VALUE:
         return "Value list"
-    if name in VOTE_ITEMS:
-        return "Community votes"
     if shiny_estimate(name) is not None:
         return "Shiny estimate"
+    if is_known(name):
+        return "Community votes (estimate)"
     return "No price yet"
 
 
@@ -844,7 +897,7 @@ def prior(name):
     est = shiny_estimate(name)
     if est:
         return math.log(est), LAM_EST
-    return math.log(DEFAULT_VALUE), LAM_DEFAULT
+    return math.log(DEFAULT_VALUE), LAM_UNLISTED
 
 
 def value_of(name, theta=None):
@@ -869,6 +922,10 @@ def has_composite(t):
 
 def has_junk(t):
     return any(is_junk(i) for i in t["offered"] + t["requested"])
+
+
+def all_unitlike(t):
+    return all(is_unitlike(i) for i in t["offered"] + t["requested"])
 
 
 def build_groups(trades, now):
@@ -924,36 +981,56 @@ def fit_values(groups, items, priors):
     return theta
 
 
+def fit_model(trades, now):
+    """
+    Fit log-values from voted trades. Listed units are anchored strongly to the value list.
+    Unlisted units have a weak anchor and their result is clamped to a bounded range
+    around the median, so a run of one-sided votes cannot push them to extreme values.
+    """
+    groups = build_groups(trades, now)
+    items = set(LIST_VALUE) | {i for t in trades for i in t["offered"] + t["requested"]}
+    priors = {i: prior(i) for i in items}
+    theta = fit_values(groups, items, priors)
+
+    lo = math.log(DEFAULT_VALUE / CLAMP_FACTOR)
+    hi = math.log(DEFAULT_VALUE * CLAMP_FACTOR)
+    for i in items:
+        if i not in LIST_VALUE:
+            theta[i] = min(max(theta[i], lo), hi)
+    return theta
+
+
 def recalculate():
+    """
+    Rebuild the direct-vote index and vote counts from TRADE_DB, then refit values.
+    Only trades made of unit-like names (listed or plausible unlisted) feed the model.
+    """
     global VALUES, VOTE_ITEMS, VOTE_COUNT
     with DATA_LOCK:
         trades = list(TRADE_DB.values())
-        valid = [t for t in trades
-                 if t["offered"] and t["requested"] and not has_junk(t)]
+        valid = [t for t in trades if t["offered"] and t["requested"] and not has_junk(t)]
 
         DIRECT_INDEX.clear()
         for t in valid:
             _index_add(t)
 
-        plain_voted = [t for t in valid if t["ups"] != t["downs"] and not has_composite(t)]
-
+        voted = [t for t in valid
+                 if t["ups"] != t["downs"] and not has_composite(t) and all_unitlike(t)]
         counts = {}
-        for t in plain_voted:
+        for t in voted:
             for i in set(t["offered"]) | set(t["requested"]):
                 counts[i] = counts.get(i, 0) + 1
         VOTE_COUNT = counts
         VOTE_ITEMS = set(counts)
 
-        groups = build_groups(plain_voted, time.time())
-        items = set(LIST_VALUE) | VOTE_ITEMS
-        VALUES = fit_values(groups, items, {i: prior(i) for i in items})
+        VALUES = fit_model(voted, time.time())
 
 
 def backtest(split=0.8):
     with DATA_LOCK:
         voted = [t for t in TRADE_DB.values()
                  if t["ups"] != t["downs"] and t["offered"] and t["requested"]
-                 and not has_composite(t) and not has_junk(t)]
+                 and not has_composite(t) and not has_junk(t) and all_unitlike(t)]
     voted.sort(key=lambda t: t.get("ts", 0))
     if len(voted) < 20:
         return None
@@ -962,9 +1039,7 @@ def backtest(split=0.8):
     train, test = voted[:cut], voted[cut:]
     cut_ts = train[-1].get("ts") or time.time()
 
-    groups = build_groups(train, cut_ts)
-    items = set(LIST_VALUE) | {i for t in train for i in t["offered"] + t["requested"]}
-    theta = fit_values(groups, items, {i: prior(i) for i in items})
+    theta = fit_model(train, cut_ts)
 
     n = correct = offerer_wins = 0
     loss = 0.0
