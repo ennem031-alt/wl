@@ -209,6 +209,7 @@ class ModelTests(unittest.TestCase):
             core.TRADE_DB[str(i)] = {"id": str(i), "offered": ["goku"], "requested": ["dio"],
                                      "ups": 2, "downs": 0, "timestamp": "",
                                      "author": "same", "ts": now}
+        core.recalculate()
         wins, losses = core.direct_votes(["goku"], ["dio"])
         self.assertEqual((wins, losses), (1, 0))
 
