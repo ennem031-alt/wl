@@ -1,8 +1,16 @@
 """
-AA Trade Evaluator - core logic.
+AA Trade Evaluator - core logic (v3).
 
-Everything in this module is independent of Discord: configuration, text
-parsing, the value-list catalog, the trade history store and the value model.
+Independent of Discord: configuration, text parsing, the value-list catalog,
+the trade history store, and the value model.
+
+Key ideas:
+  - Only the bot token is used. User tokens are not supported.
+  - Units can carry stats: "dark mage with sss dmg and sss rng" becomes the
+    unit "dark mage" plus two stat parts. Its value is the sum of the parts.
+  - A unit without a price is reported as unpriced. No fake default prices.
+  - Direct vote lookups use an index, so answers do not scan the whole history.
+  - Saves and refits are batched ("dirty" flag), not done on every message.
 """
 
 import difflib
@@ -27,17 +35,13 @@ DB_FILE = os.path.join(DATA_DIR, "values_db.json")
 VALUE_LIST_FILE = os.path.join(BASE_DIR, "value_list.txt")
 
 BOT_TOKEN = ""
-USER_TOKEN = ""  # <--- BAGONG DAGDAG PARA SA USER TOKEN
+USER_TOKEN = ""  # <--- BINALIK PARA SA CHANNEL READING
 HISTORY_AUTH = ""
 VALUE_CHANNEL_ID = 0
 
 
 def load_config():
-    """
-    Read settings from environment variables first (used on Render).
-    config.json is only a fallback for running on your own PC.
-    Secrets are never stored in the code.
-    """
+    """Read settings from environment variables first (Render), then config.json (local)."""
     global BOT_TOKEN, USER_TOKEN, HISTORY_AUTH, VALUE_CHANNEL_ID
     cfg = {}
     if os.path.exists(CONFIG_FILE):
@@ -48,8 +52,7 @@ def load_config():
             sys.exit(f"[FATAL] Could not read config.json: {e}")
 
     BOT_TOKEN = (os.environ.get("BOT_TOKEN") or cfg.get("bot_token", "")).strip()
-    USER_TOKEN = (os.environ.get("USER_TOKEN") or cfg.get("user_token", "")).strip() # <--- BINABASA NA ANG USER TOKEN
-    
+    USER_TOKEN = (os.environ.get("USER_TOKEN") or cfg.get("user_token", "")).strip() # <--- KINUKUHA NA
     channel = os.environ.get("VALUE_CHANNEL_ID") or cfg.get("value_channel_id", "0")
     try:
         VALUE_CHANNEL_ID = int(str(channel).strip())
@@ -59,15 +62,11 @@ def load_config():
     if not BOT_TOKEN:
         sys.exit("[FATAL] BOT_TOKEN is not set. Add it as an environment variable or in config.json.")
 
-    # Logic para pumili kung User Token o Bot Token ang gagamitin sa history
-    use_bot_for_history = str(os.environ.get("USE_BOT_TOKEN_FOR_HISTORY", "false")).lower() == "true" or cfg.get("use_bot_token_for_history", False)
-    
-    if USER_TOKEN and not use_bot_for_history:
+    # <--- LOGIC PARA SA USER TOKEN SA CHANNEL READING
+    if USER_TOKEN:
         HISTORY_AUTH = USER_TOKEN
-        print("[INFO] Using USER_TOKEN for reading channel history.")
     else:
         HISTORY_AUTH = f"Bot {BOT_TOKEN}"
-        print("[INFO] Using BOT_TOKEN for reading channel history.")
 
 
 # ============================================================
@@ -83,8 +82,7 @@ FAIR_BAND = 0.07        # |log ratio| below this is treated as FAIR
 MIN_VOTES = 3           # below this, confidence is Low
 SHINY_MULT_DEFAULT = 2.0
 
-# Words that are not part of a unit name. They are removed before matching,
-# so "what is dio value" and "ano value ni dio" both resolve to "dio".
+# Words that are not part of a unit name. Removed before matching.
 FILLER_WORDS = {
     "what", "whats", "is", "are", "the", "of", "a", "an", "how", "much",
     "ano", "anong", "ni", "ng", "sa", "si", "ba", "po", "pa", "yung", "yong",
@@ -100,6 +98,15 @@ MY_RE = re.compile(r"(?<!\S)my\s+")          # whole word "my" only ("mamy" is a
 COMMAND_PREFIX_RE = re.compile(r"^(?:!wl|is|wtf)(?:\s+|$)")
 WIN_LOSE_RE = re.compile(r"\s+win\s+or\s+lose$")
 SIDE_SPLIT_RE = re.compile(r"\s+(?:for|vs)\s+")
+
+RANKS = {"sss", "ss", "s"}
+STAT_WORDS = {
+    "dmg": "dmg", "damage": "dmg",
+    "rng": "rng", "range": "rng",
+    "spa": "spa",
+    "stats": "stats", "stat": "stats",
+}
+STAT_ONLY_RE = re.compile(r"(?:sss|ss|s)\s+(?:dmg|damage|spa|rng|range|stats?)")
 
 
 def clean(text):
@@ -133,17 +140,51 @@ def learn_key(raw):
     return strip_filler(key) or key
 
 
+def split_stats(key):
+    """
+    Split a key into (base_unit, [stat parts]).
+      'dark mage with sss dmg and sss rng' (after norm) -> ('dark mage', ['sss dmg', 'sss rng'])
+    """
+    base, stats = [], []
+    toks = key.split()
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "with":
+            i += 1
+            continue
+        if t in RANKS and i + 1 < len(toks) and toks[i + 1] in STAT_WORDS:
+            stats.append(f"{t} {STAT_WORDS[toks[i + 1]]}")
+            i += 2
+            continue
+        base.append(t)
+        i += 1
+    return " ".join(base), stats
+
+
 def split_items(text):
+    """
+    Split a side of a trade into items. A stat phrase such as 'sss range' that follows
+    an item is attached to that item, so 'dark mage with sss dmg and sss rng' stays one item.
+    """
     parts = re.split(r"\s+and\s+|\s*[+,&]\s*", text)
-    return [p for p in (clean(x) for x in parts) if p]
+    out = []
+    for p in (clean(x) for x in parts):
+        if not p:
+            continue
+        if out and STAT_ONLY_RE.fullmatch(p):
+            out[-1] = f"{out[-1]} with {p}"
+        else:
+            out.append(p)
+    return out
 
 
 def split_sides(text):
     """
     Parse a query or a W/L post.
-      'is my Goku for Gohan win or lose' -> (["goku"], ["gohan"])
-      'is Gohan for my Goku'             -> (["goku"], ["gohan"])   ('my' marks what YOU give)
-      'is shiny sakamoto'                -> (["shiny sakamoto"], []) (single item lookup)
+      'is my Goku for Gohan win or lose'  -> (["goku"], ["gohan"])
+      'is Gohan for my Goku'              -> (["goku"], ["gohan"])   ('my' marks what YOU give)
+      'is shiny sakamoto'                 -> (["shiny sakamoto"], []) (single item lookup)
     Returns (give_raw, get_raw) or None.
     """
     s = clean(text.lower().replace("?", " "))
@@ -175,13 +216,14 @@ DISPLAY = {}             # canonical name -> display name
 ALIAS_MAP = {}           # alias key -> canonical (unambiguous only)
 AMBIG = {}               # alias key -> set of canonical names (ambiguous)
 ALIAS_KEYS = []
+COMPOSITE = {}           # composite name -> list of part names (unit + stats)
 SHINY_MULT = SHINY_MULT_DEFAULT
 DEFAULT_VALUE = 100.0
 _INGEST_MEMO = {}
 
 
 def shiny_estimate(name):
-    """Estimated value for a shiny unit that is not listed, based on its non-shiny price."""
+    """Estimated value for a shiny unit that is not listed, from its non-shiny price."""
     if name.endswith(" shiny") and name not in LIST_VALUE:
         base = ALIAS_MAP.get(name[:-6])
         if base and base in LIST_VALUE and not base.endswith(" shiny"):
@@ -195,6 +237,7 @@ def load_value_list():
     DISPLAY.clear()
     ALIAS_MAP.clear()
     AMBIG.clear()
+    COMPOSITE.clear()
     _INGEST_MEMO.clear()
 
     if not os.path.exists(VALUE_LIST_FILE):
@@ -256,6 +299,8 @@ def load_value_list():
 
 
 def display_name(canonical):
+    if canonical in COMPOSITE:
+        return " + ".join(display_name(p) for p in COMPOSITE[canonical])
     return DISPLAY.get(canonical, canonical.title())
 
 
@@ -263,17 +308,49 @@ def is_known(name):
     return name in LIST_VALUE or name in VOTE_ITEMS or shiny_estimate(name) is not None
 
 
+def priced(name):
+    """True only when a real price exists: value list, shiny estimate, or community votes."""
+    if name in COMPOSITE:
+        return all(priced(p) for p in COMPOSITE[name])
+    return name in LIST_VALUE or name in VOTE_ITEMS or shiny_estimate(name) is not None
+
+
+def build_composite(base_key, stat_keys):
+    """
+    Build a unit-with-stats item. Each part is resolved separately.
+    Parts that cannot be resolved stay as raw text and are reported as unpriced.
+    """
+    parts = []
+    if base_key:
+        status, name, _ = resolve_query(base_key)
+        parts.append(name if status == "ok" else base_key)
+    for s in stat_keys:
+        status, name, _ = resolve_query(s)
+        parts.append(name if status == "ok" else s)
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    name = " + ".join(parts)
+    COMPOSITE[name] = parts
+    return name
+
+
 def canon_ingest(raw):
-    """Map a name found in chat to a canonical unit. None = invalid or ambiguous; skip the trade."""
+    """Map a name found in chat to a canonical item. None = invalid or ambiguous; skip the trade."""
     key = norm_key(raw)
     if not key:
         return None
     if key in _INGEST_MEMO:
         return _INGEST_MEMO[key]
+
+    base, stats = split_stats(key)
     if key in ALIAS_MAP:
         out = ALIAS_MAP[key]
     elif key in AMBIG:
         out = None
+    elif stats:
+        out = build_composite(base, stats)
     else:
         close = difflib.get_close_matches(key, ALIAS_KEYS, n=1, cutoff=0.9)
         out = ALIAS_MAP[close[0]] if close else key
@@ -295,20 +372,16 @@ def parse_trade(content):
 
 def resolve_query(raw, choice_lookup=None):
     """
-    Resolve one item name from a user query.
-
-    choice_lookup(key) -> canonical or None, used for choices the user (or the
-    community) made before. Returns (status, canonical, options) where status is
-    'ok', 'ambiguous' or 'unknown'.
+    Resolve one item from a user query. Returns (status, name, options).
+    status: 'ok' | 'ambiguous' | 'unknown'.
+    Order: learned choices, exact names, unit-with-stats, then suggestions.
     """
     key = norm_key(raw)
     if not key:
         return "unknown", None, []
 
     stripped = strip_filler(key)
-    candidates = [key]
-    if stripped and stripped != key:
-        candidates.append(stripped)
+    candidates = [key] + ([stripped] if stripped and stripped != key else [])
 
     for k in candidates:
         if choice_lookup:
@@ -321,6 +394,21 @@ def resolve_query(raw, choice_lookup=None):
         name = ALIAS_MAP.get(k, k)
         if is_known(name):
             return "ok", name, []
+
+    # Unit with stats, e.g. "dark mage with sss dmg". Check the stripped form first.
+    for k in [stripped or key, key]:
+        base, stats = split_stats(k)
+        if stats and base:
+            return "ok", build_composite(base, stats), []
+
+    # A stat written alone, e.g. "sss range". Look up its alias directly so this
+    # never recurses back into resolve_query.
+    for k in [stripped or key, key]:
+        base, stats = split_stats(k)
+        if stats and not base and len(stats) == 1:
+            name = ALIAS_MAP.get(stats[0], stats[0])
+            if is_known(name):
+                return "ok", name, []
 
     return "unknown", None, suggest(stripped or key)
 
@@ -357,6 +445,8 @@ def suggest(key, n=4):
 
 
 def source_label(name):
+    if name in COMPOSITE:
+        return "Unit + stats (sum of parts)"
     if name in LIST_VALUE and name in VOTE_ITEMS:
         return "List + votes"
     if name in LIST_VALUE:
@@ -365,7 +455,13 @@ def source_label(name):
         return "Community votes"
     if shiny_estimate(name) is not None:
         return "Shiny estimate"
-    return "Unpriced"
+    return "No price yet"
+
+
+def vote_count_of(name):
+    if name in COMPOSITE:
+        return min((vote_count_of(p) for p in COMPOSITE[name]), default=0)
+    return VOTE_COUNT.get(name, 0)
 
 
 # ============================================================
@@ -373,6 +469,8 @@ def source_label(name):
 # ============================================================
 DATA_LOCK = threading.RLock()
 TRADE_DB = {}            # message id -> trade record
+DIRECT_INDEX = {}        # (frozenset offered, frozenset requested) -> set of message ids
+DIRTY = {"flag": False}  # True when something changed and needs saving/refitting
 
 
 def parse_ts(value):
@@ -382,6 +480,28 @@ def parse_ts(value):
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
+
+
+def mark_dirty():
+    DIRTY["flag"] = True
+
+
+def is_dirty():
+    return DIRTY["flag"]
+
+
+def _index_add(t):
+    key = (frozenset(t["offered"]), frozenset(t["requested"]))
+    DIRECT_INDEX.setdefault(key, set()).add(t["id"])
+
+
+def _index_remove(t):
+    key = (frozenset(t["offered"]), frozenset(t["requested"]))
+    ids = DIRECT_INDEX.get(key)
+    if ids:
+        ids.discard(t["id"])
+        if not ids:
+            DIRECT_INDEX.pop(key, None)
 
 
 def load_db():
@@ -419,21 +539,47 @@ def load_db():
 
 
 def save_db():
-    """Write to a temp file first so a crash never corrupts the database."""
+    """Write to a temp file first so a crash never corrupts the database. Call under DATA_LOCK."""
     tmp = DB_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(TRADE_DB, f)
     os.replace(tmp, DB_FILE)
 
 
-def ingest(messages, recalc=True):
-    """Add new W/L posts and refresh votes. Returns how many records were added or updated."""
+def ingest(messages, recalc=False):
+    """
+    Add W/L posts and refresh reaction counts. Nothing is saved here; call flush()
+    (or let the background loop call it). Messages without a 'reactions' key (live
+    gateway events) never overwrite existing vote counts.
+    """
     changed = 0
     with DATA_LOCK:
         for m in messages:
             content = m.get("content", "")
             if not content.lower().startswith("!wl"):
                 continue
+            key = str(m["id"])
+            existing = TRADE_DB.get(key)
+
+            if existing:
+                if "reactions" not in m:
+                    continue
+                ups = downs = 0
+                for r in m.get("reactions", []):
+                    name = (r.get("emoji") or {}).get("name")
+                    if name == "👍":
+                        ups = r.get("count", 0)
+                    elif name == "👎":
+                        downs = r.get("count", 0)
+                if existing["ups"] != ups or existing["downs"] != downs:
+                    existing["ups"], existing["downs"] = ups, downs
+                    changed += 1
+                continue
+
+            parsed = parse_trade(content)
+            if not parsed:
+                continue
+            offered, requested = parsed
             ups = downs = 0
             for r in m.get("reactions", []):
                 name = (r.get("emoji") or {}).get("name")
@@ -441,22 +587,8 @@ def ingest(messages, recalc=True):
                     ups = r.get("count", 0)
                 elif name == "👎":
                     downs = r.get("count", 0)
-
-            key = str(m["id"])
-            existing = TRADE_DB.get(key)
-            if existing:
-                if existing["ups"] == ups and existing["downs"] == downs:
-                    continue
-                existing["ups"], existing["downs"] = ups, downs
-                changed += 1
-                continue
-
-            parsed = parse_trade(content)
-            if not parsed:
-                continue
-            offered, requested = parsed
             ts_text = m.get("timestamp", "")
-            TRADE_DB[key] = {
+            t = {
                 "id": key,
                 "offered": offered,
                 "requested": requested,
@@ -466,20 +598,60 @@ def ingest(messages, recalc=True):
                 "author": str((m.get("author") or {}).get("id", "")),
                 "ts": parse_ts(ts_text),
             }
+            TRADE_DB[key] = t
+            _index_add(t)
             changed += 1
 
         if changed:
-            save_db()
+            mark_dirty()
     if changed and recalc:
-        recalculate()
+        flush()
     return changed
+
+
+def bump_reaction(message_id, emoji, delta):
+    """Live update from a 👍 / 👎 reaction add (+1) or remove (-1)."""
+    if emoji not in ("👍", "👎"):
+        return False
+    with DATA_LOCK:
+        t = TRADE_DB.get(message_id)
+        if not t:
+            return False
+        if emoji == "👍":
+            t["ups"] = max(0, t["ups"] + delta)
+        else:
+            t["downs"] = max(0, t["downs"] + delta)
+        mark_dirty()
+    return True
+
+
+def remove_trade(message_id):
+    """Live update when a W/L post is deleted."""
+    with DATA_LOCK:
+        t = TRADE_DB.pop(message_id, None)
+        if not t:
+            return False
+        _index_remove(t)
+        mark_dirty()
+    return True
+
+
+def flush():
+    """Save and refit only if something changed. Returns True when it did work."""
+    with DATA_LOCK:
+        if not DIRTY["flag"]:
+            return False
+        save_db()
+        DIRTY["flag"] = False
+    recalculate()
+    return True
 
 
 # ============================================================
 #  VALUE MODEL
 # ============================================================
 VALUES = {}              # item -> log(value) from the latest fit
-VOTE_ITEMS = set()       # items that appear in voted trades
+VOTE_ITEMS = set()       # items that appear in voted trades (plain units only)
 VOTE_COUNT = {}          # item -> number of voted trades containing it
 
 
@@ -494,6 +666,9 @@ def prior(name):
 
 
 def value_of(name, theta=None):
+    """Value of an item. Units with stats are the sum of their parts. Check priced() first."""
+    if name in COMPOSITE:
+        return sum(value_of(p, theta) for p in COMPOSITE[name])
     source = VALUES if theta is None else theta
     if name in source:
         return math.exp(source[name])
@@ -505,6 +680,10 @@ def decay(ts, now):
         return 0.5
     age_days = max(0.0, (now - ts) / 86400.0)
     return 0.5 ** (age_days / HALF_LIFE_DAYS)
+
+
+def has_composite(t):
+    return any(i in COMPOSITE for i in t["offered"] + t["requested"])
 
 
 def build_groups(trades, now):
@@ -569,32 +748,43 @@ def fit_values(groups, items, priors):
 
 
 def recalculate():
-    """Refit all values from the trade history. Call after any change to TRADE_DB."""
+    """
+    Refit values and rebuild the direct-vote index from TRADE_DB.
+    Trades that contain unit-with-stats items are not used for the fit (their
+    parts are priced separately), but they still count for direct votes.
+    """
     global VALUES, VOTE_ITEMS, VOTE_COUNT
     with DATA_LOCK:
         trades = list(TRADE_DB.values())
-        voted = [t for t in trades if t["ups"] != t["downs"] and t["offered"] and t["requested"]]
+        valid = [t for t in trades if t["offered"] and t["requested"]]
+
+        DIRECT_INDEX.clear()
+        for t in valid:
+            _index_add(t)
+
+        plain_voted = [t for t in valid if t["ups"] != t["downs"] and not has_composite(t)]
 
         counts = {}
-        for t in voted:
+        for t in plain_voted:
             for i in set(t["offered"]) | set(t["requested"]):
                 counts[i] = counts.get(i, 0) + 1
         VOTE_COUNT = counts
         VOTE_ITEMS = set(counts)
 
-        groups = build_groups(voted, time.time())
+        groups = build_groups(plain_voted, time.time())
         items = set(LIST_VALUE) | VOTE_ITEMS
         VALUES = fit_values(groups, items, {i: prior(i) for i in items})
 
 
 def backtest(split=0.8):
     """
-    Fit on the older trades, then predict the winner of the newer trades.
+    Fit on the older plain trades, then predict the winner of the newer ones.
     Returns None when there are fewer than 20 voted trades.
     """
     with DATA_LOCK:
         voted = [t for t in TRADE_DB.values()
-                 if t["ups"] != t["downs"] and t["offered"] and t["requested"]]
+                 if t["ups"] != t["downs"] and t["offered"] and t["requested"]
+                 and not has_composite(t)]
     voted.sort(key=lambda t: t.get("ts", 0))
     if len(voted) < 20:
         return None
@@ -634,24 +824,22 @@ def backtest(split=0.8):
 
 def direct_votes(give, get):
     """
-    Exact matches only (same item sets on the same sides, or flipped).
+    Exact matches only (same item sets on the same sides, or flipped), using the index.
     One vote per author. Returns (wins, losses) for the user.
     """
     sg, st = frozenset(give), frozenset(get)
+    with DATA_LOCK:
+        forward = [(mid, False) for mid in DIRECT_INDEX.get((sg, st), ())]
+        backward = [(mid, True) for mid in DIRECT_INDEX.get((st, sg), ())]
+        rows = []
+        for mid, flipped in forward + backward:
+            t = TRADE_DB.get(mid)
+            if t and t["ups"] != t["downs"]:
+                rows.append((t, flipped))
+
     wins = losses = 0
     seen_authors = set()
-    with DATA_LOCK:
-        trades = list(TRADE_DB.values())
-    for t in trades:
-        if t["ups"] == t["downs"]:
-            continue
-        o, r = frozenset(t["offered"]), frozenset(t["requested"])
-        if (sg, st) == (o, r):
-            flipped = False
-        elif (sg, st) == (r, o):
-            flipped = True
-        else:
-            continue
+    for t, flipped in rows:
         author = t.get("author") or t.get("id")
         if author in seen_authors:
             continue
