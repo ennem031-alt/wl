@@ -1,5 +1,5 @@
 """
-AA Trade Evaluator - core logic (v4).
+AA Trade Evaluator - core logic (v5).
 
 Independent of Discord: configuration, text parsing, value list, trade history,
 and the value model.
@@ -8,6 +8,8 @@ Key ideas:
   - Only the bot token is used. User tokens are not supported.
   - Units can carry stats: "dark mage with sss dmg and sss rng" is the unit "dark mage"
     plus two stat parts. Its value is the sum of the parts.
+  - Stat words alone ("sss", "damage", "range") are never units. Trades that contain
+    them are rejected, and old junk is removed from the database at startup.
   - "evo" and "unevo" are part of the unit name. An evo unit is priced separately.
   - Typos are corrected only against the value list vocabulary, never against chat.
   - Unknown units are kept so the community votes can price them. They are also
@@ -111,8 +113,12 @@ STAT_WORDS = {
     "stats": "stats", "stat": "stats",
 }
 STAT_ONLY_RE = re.compile(r"(?:sss|ss|s)\s+(?:dmg|damage|spa|rng|range|stats?)")
+# "... and sss range": the "and" joins a stat, not a new unit.
+AND_STAT_RE = re.compile(r"\s+and\s+(?=(?:sss|ss|s)\s+(?:dmg|damage|spa|rng|range|stats?)\b)")
 EVO_WORDS = {"evo", "unevo"}
 SKIP_WORDS = {"with", "and"}
+# Words that can never be a unit on their own.
+STAT_TOKENS = set(STAT_WORDS) | RANKS | {"stat", "stats", "with", "and"}
 
 
 def clean(text):
@@ -316,6 +322,21 @@ def is_known(name):
     return name in LIST_VALUE or name in VOTE_ITEMS or shiny_estimate(name) is not None
 
 
+def is_junk(name):
+    """
+    True when a name is only stat words ('sss', 'damage', 'range') and is not a real unit.
+    Composite items are junk if any of their parts is junk.
+    """
+    if not name:
+        return True
+    if name in COMPOSITE:
+        return any(is_junk(p) for p in COMPOSITE[name])
+    if name in LIST_VALUE:
+        return False
+    toks = name.replace(" shiny", "").split()
+    return not toks or all(t in STAT_TOKENS for t in toks)
+
+
 def priced(name):
     if name in COMPOSITE:
         return all(priced(p) for p in COMPOSITE[name])
@@ -382,34 +403,40 @@ def _resolve_for_ingest(key):
     return ALIAS_MAP[close[0]] if close else key
 
 
-def canon_ingest(raw, track=False):
+def canon_ingest(raw):
     """
-    Map a name from chat to a canonical item. Returns None only for empty or ambiguous
-    names. Unknown names are kept so votes can price them. With track=True they are
-    also counted in the pending log.
+    Map a name from chat to a canonical item. Returns None for empty or ambiguous names.
+    Unknown names are kept so votes can price them. Pending tracking is done by parse_trade.
     """
     key = fix_typos(norm_key(raw))
     if not key:
         return None
     if key in _INGEST_MEMO:
-        out = _INGEST_MEMO[key]
-    else:
-        out = _resolve_for_ingest(key)
-        _INGEST_MEMO[key] = out
-    if track and out and out not in COMPOSITE and not is_known(out):
-        note_pending(out)
+        return _INGEST_MEMO[key]
+    out = _resolve_for_ingest(key)
+    _INGEST_MEMO[key] = out
     return out
 
 
 def parse_trade(content, track=False):
+    """
+    Parse a W/L post. Returns (offered, requested) or None. A trade is rejected when
+    any side is empty, ambiguous, or contains stat words with no unit (junk).
+    """
     parsed = split_sides(content)
     if not parsed or not parsed[1]:
         return None
     give_raw, get_raw = parsed
-    offered = [canon_ingest(x, track) for x in give_raw]
-    requested = [canon_ingest(x, track) for x in get_raw]
+    offered = [canon_ingest(x) for x in give_raw]
+    requested = [canon_ingest(x) for x in get_raw]
     if not all(offered) or not all(requested):
         return None
+    if any(is_junk(i) for i in offered + requested):
+        return None
+    if track:
+        for i in offered + requested:
+            if i not in COMPOSITE and not is_known(i):
+                note_pending(i)
     return offered, requested
 
 
@@ -450,7 +477,8 @@ def group_by_evo(words):
 def segment(words, lookup=None, max_len=5):
     """
     Dynamic programming over the words. A known unit scores higher the longer it is,
-    so 'dark mage' is one item. Unknown words score -1 each.
+    so 'dark mage' is one item. Unknown words score -1 each. Stat phrases score
+    strongly so they stay attached to the unit before them.
     Returns [(kind, text)] where kind is 'k' (known), 's' (stat), or '?' (unknown).
     """
     n = len(words)
@@ -463,7 +491,7 @@ def segment(words, lookup=None, max_len=5):
         for j in range(i + 1, min(n, i + max_len) + 1):
             chunk = " ".join(words[i:j])
             if STAT_ONLY_RE.fullmatch(chunk):
-                cands.append((best[j][0] + 0.5 * (j - i), [("s", chunk)] + best[j][1]))
+                cands.append((best[j][0] + 2.0 * (j - i), [("s", chunk)] + best[j][1]))
             elif is_known_chunk(chunk, lookup):
                 cands.append((best[j][0] + (j - i) ** 1.5, [("k", chunk)] + best[j][1]))
         best[i] = max(cands, key=lambda c: c[0])
@@ -484,6 +512,8 @@ def segment(words, lookup=None, max_len=5):
 
 def split_items(text, lookup=None):
     """Split one side of a trade into items, with or without commas."""
+    # "dark mage with sss dmg and sss rng": the "and" joins stats, so keep them on the unit.
+    text = AND_STAT_RE.sub(" with ", text)
     parts = re.split(r"\s+and\s+|\s*[+,&]\s*", text)
     out = []
     for p in (clean(x) for x in parts):
@@ -586,7 +616,7 @@ def suggest(key, n=4):
     out, seen = [], set()
     for _, cand in scored:
         canonical = ALIAS_MAP.get(cand, cand)
-        if canonical in seen:
+        if canonical in seen or is_junk(canonical):
             continue
         seen.add(canonical)
         out.append((display_name(canonical), canonical))
@@ -667,11 +697,14 @@ def load_db():
         print(f"[WARN] Could not read values_db.json: {e}")
         return
 
-    loaded = {}
+    loaded, skipped = {}, 0
     for key, t in raw.items():
         offered = [c for c in (canon_ingest(x) for x in t.get("offered", [])) if c]
         requested = [c for c in (canon_ingest(x) for x in t.get("requested", [])) if c]
         if not offered or not requested:
+            continue
+        if any(is_junk(i) for i in offered + requested):
+            skipped += 1
             continue
         ts = t.get("ts") or parse_ts(t.get("timestamp", ""))
         loaded[key] = {
@@ -687,6 +720,9 @@ def load_db():
     with DATA_LOCK:
         TRADE_DB.clear()
         TRADE_DB.update(loaded)
+    if skipped:
+        print(f"[CLEAN] Removed {skipped} junk trades from database.")
+        mark_dirty()
     print(f"[OK] Loaded {len(loaded)} trades from database.")
 
 
@@ -831,6 +867,10 @@ def has_composite(t):
     return any(i in COMPOSITE for i in t["offered"] + t["requested"])
 
 
+def has_junk(t):
+    return any(is_junk(i) for i in t["offered"] + t["requested"])
+
+
 def build_groups(trades, now):
     latest = {}
     for t in trades:
@@ -888,7 +928,8 @@ def recalculate():
     global VALUES, VOTE_ITEMS, VOTE_COUNT
     with DATA_LOCK:
         trades = list(TRADE_DB.values())
-        valid = [t for t in trades if t["offered"] and t["requested"]]
+        valid = [t for t in trades
+                 if t["offered"] and t["requested"] and not has_junk(t)]
 
         DIRECT_INDEX.clear()
         for t in valid:
@@ -912,7 +953,7 @@ def backtest(split=0.8):
     with DATA_LOCK:
         voted = [t for t in TRADE_DB.values()
                  if t["ups"] != t["downs"] and t["offered"] and t["requested"]
-                 and not has_composite(t)]
+                 and not has_composite(t) and not has_junk(t)]
     voted.sort(key=lambda t: t.get("ts", 0))
     if len(voted) < 20:
         return None
