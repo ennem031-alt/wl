@@ -1,5 +1,5 @@
 """
-AA Trade Evaluator - core logic (v8).
+AA Trade Evaluator - core logic (v9).
 
 Independent of Discord: configuration, text parsing, value list, trade history,
 and the value model. No external AI or API is used. The "smart" parts are rule-based
@@ -9,6 +9,8 @@ by the bot.
 Key ideas:
   - Prices come from value_list.txt first. Unlisted units can get a bounded estimate
     from community votes, but only with enough votes.
+  - A comma separates items. A stat ("sss range") attaches only to the unit in the
+    same comma-separated part, so "shiny violentine, and sss range" is two items.
   - Units can carry stats: "dark mage with sss dmg and sss rng" is the unit "dark mage"
     plus two stat parts. Its value is the sum of the parts.
   - "evo" and "unevo" are part of the unit name, and "unevo" works before or after the
@@ -127,8 +129,10 @@ STAT_WORDS = {
     "stats": "stats", "stat": "stats",
 }
 STAT_ONLY_RE = re.compile(r"(?:sss|ss|s)\s+(?:dmg|damage|spa|rng|range|stats?)")
-# "... and sss range": the "and" joins a stat, not a new unit.
-AND_STAT_RE = re.compile(r"\s+and\s+(?=(?:sss|ss|s)\s+(?:dmg|damage|spa|rng|range|stats?)\b)")
+# "unit with sss dmg and sss range": the "and" joins two stats of the SAME item.
+# A comma before the "and" means a new item, so it is not matched here.
+AND_STAT_RE = re.compile(
+    r"(?<![,+&])\s+and\s+(?=(?:sss|ss|s)\s+(?:dmg|damage|spa|rng|range|stats?)\b)")
 EVO_WORDS = {"evo", "unevo"}
 SKIP_WORDS = {"with", "and"}
 # Words that can never be a unit on their own.
@@ -610,10 +614,11 @@ def segment(words, lookup=None, max_len=5):
 
 def split_items(text, lookup=None):
     """
-    Split one side of a trade into items, with or without commas.
-    Filler words are removed first. A "shiny" anywhere in a part marks the unit in that part.
+    Split one side of a trade into items. A comma (or + or &) always starts a new item.
+    Within one item, filler words are removed, a "shiny" marks that item's unit, and a
+    stat attaches only to a unit from the same item.
     """
-    # "dark mage with sss dmg and sss rng": the "and" joins stats, so keep them on the unit.
+    # "unit with sss dmg and sss rng": the "and" joins two stats of the same item.
     text = AND_STAT_RE.sub(" with ", text)
     parts = re.split(r"\s+and\s+|\s*[+,&]\s*", text)
     out = []
@@ -625,16 +630,19 @@ def split_items(text, lookup=None):
         words = [w for w in fix_typos(norm_key(p, shiny_aware=False)).split()
                  if w not in FILLER_WORDS]
         words = move_unevo(words)
+
+        part_out = []
         shiny_done = False
         for group in group_by_evo(words):
             for kind, chunk in segment(group, lookup):
-                if kind == "s" and out:
-                    out[-1] = f"{out[-1]} with {chunk}"
+                if kind == "s" and part_out:
+                    part_out[-1] = f"{part_out[-1]} with {chunk}"
                     continue
                 if is_shiny and not shiny_done and kind != "s":
                     chunk = f"{chunk} shiny"
                     shiny_done = True
-                out.append(chunk)
+                part_out.append(chunk)
+        out.extend(part_out)
     return out
 
 
