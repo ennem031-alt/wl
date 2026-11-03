@@ -1,23 +1,21 @@
-# AA - Value List  (galing sa screenshots mo)
-# Format:  value | Pangalan A / Pangalan B / ...      (lagyan ng (SHINY) kung shiny)
-# Pwede mong dagdagan o baguhin anytime. I-restart lang ang bot pagkatapos.
-# Lines na nagsisimula sa # ay hindi binabasa.
-# Hindi pa kasama: "Owner's Choice" units (Jio Shiny, Future Guhon Shiny) at mga rows na hindi kita sa screenshots.
+# AA - Value List (from AA- Value List sheet screenshots, Nov 2026)
+# Format:  value | Name A / Name B / ...      (add (SHINY) if the unit is shiny)
+# Lines starting with # are ignored.
+# Owner's Choice, N/A, and Untradable units are not included (no numeric value).
 
-# ---------- GAMEPASSES ----------
+# ---------- GAMEPASSES (kept from previous list; not in these screenshots) ----------
 215 | Shiny Hunter / Hunter Shiny
 200 | Skip 10 Levels
-180 | Battle Pass
+180 | Battle Pass / BP
 110 | Display All Units
 30 | VIP
 20 | Display 3 Units
 10 | Unit Storage
 
-# ---------- SKINS (Rainbow) ----------
+# ---------- SKINS (kept from previous list; not in these screenshots) ----------
 12500 | Bulmy (Teen) / Bulma Rainbow
 5000 | Orwin (Headless) / Erwin Rainbow
 2500 | Pito (Halloween) / Pito Rainbow
-# ---------- SKINS (Normal) ----------
 360 | Bulmy (Teen) / Bulma (Any Colour)
 135 | Orwin (Delinquent) / Erwin (Any Colour)
 125 | Orwin (Headless) / Erwin (Any Colour)
@@ -28,208 +26,224 @@
 10 | Tangen / Tango (Festival)
 10 | Metal Knight / Metal Knight (Coco)
 
-# ---------- STATS (SSS) ----------
-450 | SSS DMG / DMG
-435 | SSS SPA / SPA
-300 | SSS RNG / RNG
+# ---------- STATS (sheet: Stats tab) ----------
+500 | SSS DMG / DMG
+460 | SSS SPA / SPA
+380 | SSS RNG / RNG
+110 | SS DMG
+90 | SS SPA
+60 | SS RNG
 
-# ---------- S TIER ----------
-16000 | Future Guhon / Gohan
-14500 | Jio (Over Heaven) / Dio
-12500 | Blue Devil / Rin (SHINY)
-7500 | Blue Devil / Rin
-5850 | Mist Ninja / Zabuza (SHINY)
-5350 | Roger / Gol D. Roger (SHINY)
-5250 | Android 21 (SHINY)
-3900 | Homuru / Homura (SHINY)
-3600 | Emili / Emilia (SHINY)
-3300 | Toby / Tobi (SHINY)
-3175 | Android 21
-3100 | Skull Knight (SHINY)
-3000 | Hie / Hiei (SHINY)
-2750 | Boron / Boros (SHINY)
-2500 | Ging / Gin (SHINY)
+# ---------- HIGHEST / TOP S TIER ----------
+38500 | Jio (Over Heaven) / Dio
+33000 | Time Saviour / Gohan
+30000 | Blue Flare / Rin (SHINY)
+22800 | Blue Flare / Rin
+20600 | Dracula / Alucard (SHINY)
+20000 | Shade Hunter / Zabuza (SHINY)
+17250 | Artificial AAA / A21 (SHINY)
+15000 | Illusionist / Aizen (SHINY)
+
+# ---------- MID S TIER ----------
+10750 | Shadowgirl / Homura (SHINY)
+10000 | Artificial AAA / A21
+6450 | Pirate King / Gol D. Roger (SHINY)
+5850 | Ice Lily / Emilia (SHINY)
+5650 | Skeleton Knight / Skull Knight (SHINY)
+4250 | Demonshade / Hiei (SHINY)
+3650 | Blood / Power (SHINY)
+3300 | Lord Alien King / Boros (SHINY)
+3000 | Joker / Shidou (SHINY)
+
+# ---------- LOW S TIER ----------
+2900 | Toby / Tobi (SHINY)
+2700 | Golden King / Gilgamesh (SHINY)
+2600 | White Snake / Gin (SHINY)
 2500 | Saicky / Saiki K (SHINY)
-2000 | Jelly / Jellal (SHINY)
-2000 | Lulu / Lelouch (SHINY)
-1850 | Gilgamesh (SHINY)
-1750 | Unohona / Unohana (SHINY)
-1650 | Kumo / Kuma (SHINY)
-1550 | Mamy / Mami (SHINY)
+2450 | Riony / Rias (SHINY)
+2250 | Jelly / Jellal (SHINY)
+2100 | Blood Queen / Unohana (SHINY)
+1800 | Dracula / Alucard
+1800 | Phantom King / Lelouch (SHINY)
+1650 | Millie / Mamy (SHINY)
+1600 | Illusionist / Aizen
+1550 | Kumo / Kuma (SHINY)
 
 # ---------- A TIER ----------
-1450 | Saiky / Saiki
-1425 | Tango / Tengen (SHINY)
-1400 | Hie / Hiei
-1400 | Power (SHINY)
-1350 | Kumo / Kuma
-1350 | Flamingo / Doflamingo (SHINY)
-1300 | Piccoru / Piccolo (SHINY)
-1300 | Roger / Gol D. Roger
-1200 | Kisoko / Kisuke (Bankai) (SHINY)
-1175 | Ezra / Erza (Lightning) (SHINY)
-1100 | Merlyn / Merlin (SHINY)
-1000 | Yamomoto / Yamamoto (SHINY)
-975 | Wavy / Nejire (SHINY)
-950 | Ria / Rias (SHINY)
-925 | Snake Princess / Boa (SHINY)
-900 | Shisu / Shisui (SHINY)
-875 | Rayleigh (SHINY)
-850 | Kenshi / Kenshin (SHINY)
-800 | Poseidon (SHINY)
-800 | Kimomaro / Kimimaro (SHINY)
-800 | Temori / Temari (SHINY)
-800 | Jozo / Jozu (SHINY)
-725 | Mist Ninja / Zabuza
-675 | Harribu / Harribel (SHINY)
-675 | Angel (SHINY)
-635 | Issai / Issei (SHINY)
-625 | Bombietta / Bambietta (SHINY)
-625 | Luci / Lucy (SHINY)
-600 | Homuru / Homura
-600 | Boxo (SHINY)
-600 | Rohon / Rohan (SHINY)
-600 | Daky / Daki (SHINY)
+650 | Bombietta / Bambietta (SHINY)
+625 | Dragon Knight / Issei
+620 | Mangaka / Rohan (SHINY)
+600 | Puppet Girl / Yoshino (SHINY)
+600 | Saka / Daki (SHINY)
+600 | Hammerhead / Harribel (SHINY)
+600 | Boxo / Boxo (SHINY)
+575 | Magic Girl / Madoka (SHINY)
+575 | Gazu / Geto (SHINY)
 575 | Ice Queen / Esdeath (SHINY)
-550 | Getu / Geto (SHINY)
-550 | Akena / Akeno (SHINY)
-545 | Nejiri / Nejire
-500 | Yoshina / Yoshino (SHINY)
-490 | Gowther / Gowthy (SHINY)
-475 | Heathcliff (SHINY)
-475 | Inuyasha / Inuyashu (SHINY)
-470 | Ji Mo Ri / Jin Mori (SHINY)
-460 | Akin / Aki (SHINY)
-460 | Tatsumo / Tatsumi (SHINY)
-450 | Madoki / Madoka (SHINY)
-450 | Cooler (SHINY)
-430 | Chainsaw (SHINY)
-425 | Peruna / Perona (SHINY)
-415 | Kenshi / Kenshin
+550 | Akemy / Akeno (SHINY)
+500 | Doll / Gowther (SHINY)
+500 | Toad Sensei / Jiraiya (SHINY)
+480 | Dog Demon / Inuyashu (SHINY)
+475 | Crusader / Heathcliff (SHINY)
+475 | Ghost Lady / Perona (SHINY)
+470 | Curse / Aki (SHINY)
+470 | Wukong / Jin Mori (SHINY)
+460 | Tattermo / Tatsumi (SHINY)
+450 | Fridge / Cooler (SHINY)
+430 | Blade Beast / Denji (Mythic) (SHINY)
+425 | Gravity Mage / Chuya (SHINY)
+415 | Katana / Kenshin
+400 | Death Ninja / Hidan (SHINY)
+400 | Messi / Isagi (SHINY)
 400 | Kimomaro / Kimimaro
-400 | Temori / Temari
-390 | Isago / Isagi (SHINY)
-385 | Ipo / Ippo (SHINY)
-385 | Jozo / Jozu
-380 | Buggy (SHINY)
-375 | Sayako / Sayaka (SHINY)
-375 | Minata / Minato (SHINY)
-375 | Kuneko / Koneko (SHINY)
-365 | Broke / Brook (SHINY)
-365 | Roshy / Roshi (SHINY)
-350 | Kyoka / Kyoko (SHINY)
-335 | Kit / Kite (SHINY)
-335 | Klay / Klein (SHINY)
-325 | Todorro / Todoroki (SHINY)
-325 | Weather / Weather Report (SHINY)
-325 | Emili / Emilia
-300 | Avdo / Avdol (SHINY)
+400 | Fan Ninja / Temari
+400 | Scarlet Slayer / Kyoka Izumi (SHINY)
+385 | Boxer / Ippo (SHINY)
+380 | Jozo / Jozu
+375 | Saki / Sayaka (SHINY)
+375 | Flash Ninja / Minato (SHINY)
+375 | Catgirl / Koneko (SHINY)
+370 | Skeleton / Brook (SHINY)
+360 | Robot Sorcerer / Mechamaru (SHINY)
+350 | Ice Lily / Emilia
+350 | Chance / Kite (SHINY)
+350 | Turtle Master / Roshi (SHINY)
+345 | Kyko / Kyoko (SHINY)
+340 | Tiger / Asushi (SHINY)
+340 | Virtual Samurai / Klein (SHINY)
+330 | Weather / Weather Report (SHINY)
+325 | Golden King / Gilgamesh
+325 | Black Dog / Akutagawa (SHINY)
+320 | Stitches / Buggy (SHINY)
+300 | Erza / Erza (Valkyrie) (SHINY)
+
+# ---------- B+ TIER ----------
+275 | Ratio / Kento Nanami (SHINY)
+275 | Erza / Erza (True Heart) (SHINY)
+275 | Sharkfin / Kisame (SHINY)
+275 | Fiend Girl / Hinamy (SHINY)
+270 | Fire First / Ace (SHINY)
+270 | Elf Mage / Frieren (SHINY)
+270 | Idol / Ai Hoshino (SHINY)
+260 | Enligthened / Buddha
+260 | Toshin / Toshiro (SHINY)
+260 | Skeleton Knight / Skull Knight
+250 | Flamefeather / Avdol (SHINY)
+250 | Gas / Gas (SHINY)
+245 | Kobeno / Kobeni (SHINY)
+245 | Hime / Himeno (SHINY)
+235 | Boxo / Boxo
+225 | Siren / Monet (SHINY)
+220 | Blood / Power
 
 # ---------- B TIER ----------
-295 | Ezra / Erza Valkyrie (SHINY)
-280 | Gilgamesh
-275 | Erza / Ezra (True Heart) (SHINY)
-275 | Kizume / Kisame (SHINY)
-260 | Toshin / Toshiro (SHINY)
-250 | Skull Knight
-250 | Kent / Kento (SHINY)
-250 | Boxo
-235 | Kobeno / Kobeni (SHINY)
-235 | Hime / Himeno (SHINY)
-230 | Fire Fist / Ace (SHINY)
-225 | Boros / Boron
-215 | Doflamingo / Flamingo
+190 | Lulu / Lelouch
+190 | Cream / Vanilla Ice (SHINY)
 185 | Lucky / Luck (SHINY)
-185 | Moriu / Moria (SHINY)
-185 | Lulu / Lelouch
-175 | Yamomoto / Yamamoto (Hellfire)
-175 | Inuyasha / Inuyashu
-175 | Ji Mo Ri / Jin Mori
-175 | Tatsumo / Tatsumi
-170 | Oshy / Ai Hoshino (SHINY)
-160 | Ipo / Ippo
-150 | Power
-145 | Mira / Mirko (SHINY)
-135 | Denjy / Denji Secret (SHINY)
-135 | Isago / Isagi
+185 | Morbid / Moria (SHINY)
+180 | Dark Mage / Judar
+175 | Dog Demon / Inuyasha
+175 | Wukong / Jin Mori
+170 | Umbra / Cid
+165 | Lord Alien King / Boron
+160 | Stringy / Doflamingo
+160 | Fiery Commander / Yamamoto (Hellfire)
+160 | Tattermo / Tatsumi
+155 | Bladebeast / Denji (Secret) (SHINY)
+150 | Mira / Mirko (SHINY)
+150 | Boxer / Ippo
+135 | Erza / Erza (Lightning)
+135 | Messi / Isagi
 135 | Carrot (SHINY)
 125 | Ichi (Full Hollow) / Ichigo (Full Hollow) (SHINY)
-120 | Kisoko / Kisuke
-120 | Buggy
-115 | Merlyn / Merlin
-115 | Haka / Haku (SHINY)
+120 | Trickster / Kisuke
+115 | Mirror Ninja / Haku (SHINY)
+115 | Sea God / Poseidon
+110 | Weather Girl / Nami (SHINY)
 110 | Jellal / Jelly
-105 | Poseidon
-100 | Rohon / Rohan
+110 | Veko (SHINY)
+105 | Infinity Mage / Merlin
+100 | Agony / Pain
+100 | Toad Sensei / Jiraiya
 100 | Renzi / Renji (SHINY)
-95 | Nami / Navi (SHINY)
-90 | Ezra / Erza (Lightning)
-80 | Daky / Daki
-75 | Getu / Geto (Maximum)
-70 | Ice Queen / Esdeath
-70 | Veko (SHINY)
-65 | Luci / Lucy (All Keys)
-65 | Heathcliff
-65 | Piccoru / Piccolo
-60 | Mamy / Mami
-60 | Shisu / Shisui
-60 | Navi / Nami
-60 | Oshy / Ai Hoshino
-60 | Issai / Issei
-60 | Angel
-55 | Ria / Rias
-55 | Brook / Broke
 
-# ---------- C TIER ----------
-50 | Madoka / Madoko
-50 | Akena / Akeno
-50 | Gati / Geten (SHINY)
-50 | Nightmare Luffo / Nightmare Luffy (SHINY)
+# ---------- B- TIER ----------
+90 | Inhuman / Dazai
+85 | Idol / Ai Hoshino
+80 | Mangaka / Rohan
+80 | Saka / Daki
+75 | Gazu / Geto (Maximum)
+70 | Ice Queen / Esdeath
+70 | Lyla / Lucy (All Keys)
+65 | Weather Girl / Nami
+65 | Crusader / Heathcliff
+65 | Green Alien / Piccolo
+65 | Robot Sorcerer
+60 | Millie / Mami
+60 | Shizo / Shisui
+60 | Paragon / Angel
+60 | Stitches / Buggy
+55 | Riony / Rias
+55 | Skeleton / Brook
+
+# ---------- C+ TIER ----------
+50 | Magic Girl / Madoka
+50 | Gravity Mage / Chuyo
+50 | Akemy / Akeno
 50 | Shingo / Shinji (SHINY)
 50 | Mecha Freezo / Mecha Frieza (SHINY)
-50 | Chainsaw / Denji
-50 | Aki / Akin
-50 | Koneko / Kuneko
+50 | Blade Beast / Denji (Mythic)
+50 | Curse / Aki
+50 | Catgirl / Koneko
+45 | Death Ninja / Hidan
 45 | Bombietta / Bambietta
-45 | Sayako / Sayaka
-40 | Harribel / Harribu
-40 | Peruna / Perona
-40 | Klay / Klein
-40 | Ezra / Erza (Valkyrie)
-35 | Avdol / Avdo
-30 | Snake Princess / Boa
-30 | Minata / Minato
-30 | Rayleigh
+45 | Saki / Sayaka
+45 | Hammerhead / Harribel
+40 | Fiend Girl / Hinamy
+40 | Scarlet Slayer / Kyoka Izumi
+40 | Tiger / Asushi
+40 | Siren / Monet
+40 | Ghost Lady / Perona
+40 | Virtual Samurai / Klein
+35 | Erza / Erza (Valkyrie)
+35 | Gas / Gas
+35 | Flamefeather / Avdol
+35 | Snake Princess / Boa
+30 | Elf Mage / Frieren
+30 | Flash Ninja / Minato
+30 | Silver King / Rayleigh
 30 | Tango / Tengen
-30 | Unohona / Unohana
-25 | Kizume / Kisame
-25 | Kyoka / Kyoko
+30 | Black Dog / Akutagawa
+30 | Blood Queen / Unohana
+
+# ---------- C TIER ----------
+25 | Sharkfin / Kisame
+25 | Kyko / Kyoko
 25 | Hime / Himeno
 25 | Kobeno / Kobeni
-25 | Gowthy / Gowther
-25 | Cooler
+25 | Doll / Gowther
+25 | Fridge / Cooler
 20 | Tobi / Toby
-20 | Erza / Ezra (True Heart)
-20 | Roshy / Roshi
-15 | Luci / Lucy (Missing Keys)
-15 | Todorro / Todoroki
+20 | Erza / Erza (True Heart)
+20 | Turtle / Roshi
+20 | Cream / Vanilla Ice
+15 | Lily / Lucy (Missing Keys)
 15 | Toshin / Toshiro
-15 | Kent / Kento
+15 | Ratio / Kento Nanami
 15 | Heavy Weather / Weather Report
+
+# ---------- C- TIER ----------
 10 | Kit / Kite
 10 | Lucky / Luck
 10 | Veko
-10 | Ging / Gin
-10 | Moriu / Moria
-10 | Haka / Haku
-5 | Fire Fist / Ace
+10 | White Snake / Gin
+10 | Morbid / Moria
+10 | Fire First / Ace
 5 | Ichi (Full Hollow) / Ichigo (Full Hollow)
 5 | Renzi / Renji
 5 | Luffo (Marine's Ford) / Luffy (Marineford)
-5 | Nightmare Luffo / Nightmare Luffy
 5 | Shingo / Shinji
-5 | Gati / Geten
 5 | Mecha Freezo / Mecha Frieza
-5 | Yoshina / Yoshino
+5 | Puppet Girl / Yoshino
 5 | Carrot
 5 | Mira / Mirko
