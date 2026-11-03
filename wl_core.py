@@ -1,5 +1,5 @@
 """
-AA Trade Evaluator - core logic (v9).
+AA Trade Evaluator - core logic (v11).
 
 Independent of Discord: configuration, text parsing, value list, trade history,
 and the value model. No external AI or API is used. The "smart" parts are rule-based
@@ -7,18 +7,22 @@ parsing, a local fuzzy name matcher (character trigrams), and learned choices st
 by the bot.
 
 Key ideas:
+  - Every unit has a base name and a state: normal, evo, or unevo. Any unit can be
+    in any state. "unevo somber", "somber unevo", and "somber (UNEVO)" are the same
+    variant, written as "unevo somber" internally.
+  - A state is priced only from its own value list line, for example
+    "240 | Somber (UNEVO)". The bot never guesses an evo or unevo price from the
+    normal price. A state without a price shows "Cannot price" and is logged in
+    !pending so you can add it.
   - Prices come from value_list.txt first. Unlisted units can get a bounded estimate
     from community votes, but only with enough votes.
   - A comma separates items. A stat ("sss range") attaches only to the unit in the
-    same comma-separated part, so "shiny violentine, and sss range" is two items.
+    same comma-separated part.
   - Units can carry stats: "dark mage with sss dmg and sss rng" is the unit "dark mage"
     plus two stat parts. Its value is the sum of the parts.
-  - "evo" and "unevo" are part of the unit name, and "unevo" works before or after the
-    name ("violentine unevo" means "unevo violentine").
   - Filler words, stat words alone, evo words alone, and chat noise are never units.
   - Typos are corrected against the value list vocabulary, and close misspellings of
     known names are matched by a local trigram matcher.
-  - Unit-like names that are not priced are logged in pending_units.json for review.
   - Saves and refits are batched ("dirty" flag).
 """
 
@@ -143,6 +147,24 @@ def clean(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def canonical_variant(text):
+    """
+    Put the evo state first, so every spelling of one variant is the same string:
+      'somber unevo'  -> 'unevo somber'
+      'freiren evo'   -> 'evo freiren'
+      'unevo somber shiny' stays as it is.
+    Text with no state, or with more than one state word, is returned unchanged.
+    """
+    toks = text.split()
+    states = [t for t in toks if t in EVO_WORDS]
+    if len(states) != 1:
+        return text
+    base = [t for t in toks if t not in EVO_WORDS]
+    if not base:
+        return text
+    return " ".join([states[0]] + base)
+
+
 def pct_of(raw):
     """Percent in a message, e.g. 'sss dmg 45%' -> 45.0. Kept for later pricing."""
     m = re.search(r"(\d+(?:\.\d+)?)\s*%", raw)
@@ -173,7 +195,7 @@ def strip_filler(key):
 
 def learn_key(raw):
     """The key a user's choice is saved under. Same normalization as resolve_query."""
-    key = fix_typos(norm_key(raw))
+    key = canonical_variant(fix_typos(norm_key(raw)))
     return strip_filler(key) or key
 
 
@@ -329,7 +351,8 @@ def load_value_list():
             shiny = bool(re.search(r"\(\s*shiny\s*\)", names, re.IGNORECASE))
             names = re.sub(r"\(\s*shiny\s*\)", "", names, flags=re.IGNORECASE)
             parts = [p.strip() for p in names.split("/") if p.strip()]
-            aliases = [k for k in (norm_key(p, shiny_aware=False) for p in parts) if k]
+            aliases = [canonical_variant(k) for k in
+                       (norm_key(p, shiny_aware=False) for p in parts) if k]
             if aliases:
                 entries.append((val, parts, aliases, shiny))
 
@@ -374,7 +397,12 @@ def load_value_list():
 def display_name(canonical):
     if canonical in COMPOSITE:
         return " + ".join(display_name(p) for p in COMPOSITE[canonical])
-    return DISPLAY.get(canonical, canonical.title())
+    if canonical in DISPLAY:
+        return DISPLAY[canonical]
+    toks = canonical.split()
+    if toks and toks[0] in EVO_WORDS:
+        return f"{toks[0].capitalize()} {' '.join(toks[1:]).title()}"
+    return canonical.title()
 
 
 def is_junk(name):
@@ -500,7 +528,7 @@ def canon_ingest(raw):
     Map a name from chat to a canonical item. Returns None for empty or ambiguous names.
     Unknown names are kept as-is so votes can still be recorded.
     """
-    key = fix_typos(norm_key(raw))
+    key = canonical_variant(fix_typos(norm_key(raw)))
     if not key:
         return None
     if key in _INGEST_MEMO:
@@ -536,7 +564,7 @@ def parse_trade(content, track=False):
 #  SEGMENTATION (no comma needed)
 # ============================================================
 def is_known_chunk(chunk, lookup=None):
-    key = fix_typos(norm_key(chunk))
+    key = canonical_variant(fix_typos(norm_key(chunk)))
     if not key:
         return False
     if lookup and lookup(key):
@@ -612,11 +640,39 @@ def segment(words, lookup=None, max_len=5):
     return out
 
 
+def attach_evo_words(chunks, lookup=None):
+    """
+    Keep 'evo' and 'unevo' with the unit they belong to:
+      ('?', 'unevo') + ('k', 'somber')  -> ('?', 'unevo somber')
+      ('k', 'somber') + ('?', 'evo')    -> ('?', 'somber evo')
+    Done before 'shiny' is applied, so shiny marks the whole variant.
+    """
+    out, prefix = [], None
+    for kind, chunk in chunks:
+        if prefix is not None:
+            text = f"{prefix} {chunk}"
+            prefix = None
+            out.append(("k" if is_known_chunk(text, lookup) else "?", text))
+            continue
+        if kind == "?" and chunk == "unevo":
+            prefix = "unevo"
+            continue
+        if kind == "?" and chunk == "evo" and out and out[-1][0] != "s":
+            pk, pc = out.pop()
+            text = f"{pc} evo"
+            out.append(("k" if is_known_chunk(text, lookup) else "?", text))
+            continue
+        out.append((kind, chunk))
+    if prefix is not None:
+        out.append(("?", prefix))
+    return out
+
+
 def split_items(text, lookup=None):
     """
     Split one side of a trade into items. A comma (or + or &) always starts a new item.
     Within one item, filler words are removed, a "shiny" marks that item's unit, and a
-    stat attaches only to a unit from the same item.
+    stat attaches only to a unit from the same item. Evo states are kept in front.
     """
     # "unit with sss dmg and sss rng": the "and" joins two stats of the same item.
     text = AND_STAT_RE.sub(" with ", text)
@@ -634,14 +690,14 @@ def split_items(text, lookup=None):
         part_out = []
         shiny_done = False
         for group in group_by_evo(words):
-            for kind, chunk in segment(group, lookup):
+            for kind, chunk in attach_evo_words(segment(group, lookup), lookup):
                 if kind == "s" and part_out:
                     part_out[-1] = f"{part_out[-1]} with {chunk}"
                     continue
                 if is_shiny and not shiny_done and kind != "s":
                     chunk = f"{chunk} shiny"
                     shiny_done = True
-                part_out.append(chunk)
+                part_out.append(canonical_variant(chunk))
         out.extend(part_out)
     return out
 
@@ -679,9 +735,12 @@ def split_sides(text, lookup=None):
 def resolve_query(raw, choice_lookup=None):
     """
     Returns (status, name, options). status: 'ok' | 'ambiguous' | 'unknown'.
-    Order: learned choices, exact aliases, unit with stats, close fuzzy match, then suggestions.
+    Order: learned choices, exact aliases, evo state on a known unit, unit with stats,
+    close fuzzy match, then suggestions.
+    A known unit in an evo state that has no price is still 'ok'. It is reported as
+    'Cannot price' instead of 'unrecognized'.
     """
-    key = fix_typos(norm_key(raw))
+    key = canonical_variant(fix_typos(norm_key(raw)))
     if not key:
         return "unknown", None, []
 
@@ -700,19 +759,30 @@ def resolve_query(raw, choice_lookup=None):
         if is_known(name):
             return "ok", name, []
 
-    for k in [stripped or key, key]:
+    probe = stripped or key
+
+    for k in [probe, key]:
         base, stats = split_stats(k)
         if stats and base:
             return "ok", build_composite(base, stats), []
 
-    for k in [stripped or key, key]:
+    for k in [probe, key]:
         base, stats = split_stats(k)
         if stats and not base and len(stats) == 1:
             name = ALIAS_MAP.get(stats[0], stats[0])
             if is_known(name):
                 return "ok", name, []
 
-    probe = stripped or key
+    # An evo state on a known unit, e.g. "unevo somber". It is recognized even when it has
+    # no price, so the trade says "Cannot price" instead of "unrecognized".
+    words = probe.split()
+    if words and words[0] in EVO_WORDS and len(words) > 1:
+        base_text = " ".join(words[1:])
+        if not split_stats(base_text)[1]:
+            status, base_name, _ = resolve_query(base_text)
+            if status == "ok" and base_name and not is_junk(base_name) and base_name not in COMPOSITE:
+                return "ok", f"{words[0]} {base_name}", []
+
     fuzzy = fuzzy_candidates(probe)
     if fuzzy and fuzzy[0][0] >= FUZZY_AUTO:
         if len(fuzzy) == 1 or fuzzy[0][0] - fuzzy[1][0] >= 0.05:
