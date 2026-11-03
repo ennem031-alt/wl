@@ -1,5 +1,5 @@
 """
-AA Trade Evaluator - core logic (v11).
+AA Trade Evaluator - core logic (v12).
 
 Independent of Discord: configuration, text parsing, value list, trade history,
 and the value model. No external AI or API is used. The "smart" parts are rule-based
@@ -10,12 +10,12 @@ Key ideas:
   - Every unit has a base name and a state: normal, evo, or unevo. Any unit can be
     in any state. "unevo somber", "somber unevo", and "somber (UNEVO)" are the same
     variant, written as "unevo somber" internally.
-  - A state is priced only from its own value list line, for example
-    "240 | Somber (UNEVO)". The bot never guesses an evo or unevo price from the
-    normal price. A state without a price shows "Cannot price" and is logged in
-    !pending so you can add it.
-  - Prices come from value_list.txt first. Unlisted units can get a bounded estimate
-    from community votes, but only with enough votes.
+  - A state is priced ONLY from its own value list line, for example
+    "240 | Somber (UNEVO)". Community votes never price an evo or unevo state, and the
+    bot never guesses one from the normal price. A state without a line shows
+    "Cannot price" and is logged in !pending so you can add it.
+  - Normal units: prices come from value_list.txt first. Unlisted normal units can get
+    a bounded estimate from community votes, but only with enough votes.
   - A comma separates items. A stat ("sss range") attaches only to the unit in the
     same comma-separated part.
   - Units can carry stats: "dark mage with sss dmg and sss rng" is the unit "dark mage"
@@ -86,12 +86,12 @@ def load_config():
 BETA = 2.0
 LAM_LIST = 12.0          # anchor strength for value-list units
 LAM_EST = 3.0            # anchor strength for shiny estimates
-LAM_UNLISTED = 1.0       # anchor strength for units that are not listed
-CLAMP_FACTOR = 20.0      # unlisted estimates stay within median / 20 .. median * 20
+LAM_UNLISTED = 1.0       # anchor strength for normal units that are not listed
+CLAMP_FACTOR = 20.0      # unlisted normal estimates stay within median / 20 .. median * 20
 ITERATIONS = 30
 HALF_LIFE_DAYS = 60.0
 FAIR_BAND = 0.07
-MIN_VOTES = 3            # votes needed before an unlisted unit gets a price
+MIN_VOTES = 3            # votes needed before an unlisted normal unit gets a price
 SHINY_MULT_DEFAULT = 2.0
 TYPO_CUTOFF = 0.8
 TYPO_MARGIN = 0.05
@@ -163,6 +163,12 @@ def canonical_variant(text):
     if not base:
         return text
     return " ".join([states[0]] + base)
+
+
+def is_variant(name):
+    """True for an evo or unevo state, such as 'evo freiren' or 'unevo somber shiny'."""
+    toks = name.split() if name else []
+    return bool(toks) and toks[0] in EVO_WORDS
 
 
 def pct_of(raw):
@@ -445,11 +451,15 @@ def is_unitlike(name):
 
 def is_known(name):
     """
-    A unit the bot can price: in the value list, a shiny estimate from it, or an unlisted
-    unit with enough votes to have a fitted estimate.
+    A unit the bot can price.
+      - Listed units, and shiny estimates from a listed normal unit: yes.
+      - Evo and unevo states: only from their own value list line. Never from votes.
+      - Unlisted normal units: only with enough votes, and only from the bounded estimate.
     """
     if name in LIST_VALUE or shiny_estimate(name) is not None:
         return True
+    if is_variant(name):
+        return False
     return (name in VALUES and VOTE_COUNT.get(name, 0) >= MIN_VOTES
             and is_unitlike(name))
 
@@ -1079,8 +1089,21 @@ def has_junk(t):
     return any(is_junk(i) for i in t["offered"] + t["requested"])
 
 
+def has_variant(t):
+    return any(is_variant(i) for i in t["offered"] + t["requested"])
+
+
 def all_unitlike(t):
     return all(is_unitlike(i) for i in t["offered"] + t["requested"])
+
+
+def votes_usable(t):
+    """
+    A trade can teach the model normal-unit prices only when it has no composite items,
+    no evo or unevo states, and only unit-like names. Evo and unevo states are never
+    priced from votes, so trades with them are left out of the model.
+    """
+    return (not has_composite(t) and not has_variant(t) and all_unitlike(t))
 
 
 def build_groups(trades, now):
@@ -1139,7 +1162,7 @@ def fit_values(groups, items, priors):
 def fit_model(trades, now):
     """
     Fit log-values from voted trades. Listed units are anchored strongly to the value list.
-    Unlisted units have a weak anchor and their result is clamped to a bounded range
+    Unlisted normal units have a weak anchor and their result is clamped to a bounded range
     around the median, so a run of one-sided votes cannot push them to extreme values.
     """
     groups = build_groups(trades, now)
@@ -1158,7 +1181,7 @@ def fit_model(trades, now):
 def recalculate():
     """
     Rebuild the direct-vote index and vote counts from TRADE_DB, then refit values.
-    Only trades made of unit-like names (listed or plausible unlisted) feed the model.
+    Only usable trades feed the model (see votes_usable).
     """
     global VALUES, VOTE_ITEMS, VOTE_COUNT
     with DATA_LOCK:
@@ -1169,8 +1192,7 @@ def recalculate():
         for t in valid:
             _index_add(t)
 
-        voted = [t for t in valid
-                 if t["ups"] != t["downs"] and not has_composite(t) and all_unitlike(t)]
+        voted = [t for t in valid if t["ups"] != t["downs"] and votes_usable(t)]
         counts = {}
         for t in voted:
             for i in set(t["offered"]) | set(t["requested"]):
@@ -1185,7 +1207,7 @@ def backtest(split=0.8):
     with DATA_LOCK:
         voted = [t for t in TRADE_DB.values()
                  if t["ups"] != t["downs"] and t["offered"] and t["requested"]
-                 and not has_composite(t) and not has_junk(t) and all_unitlike(t)]
+                 and not has_junk(t) and votes_usable(t)]
     voted.sort(key=lambda t: t.get("ts", 0))
     if len(voted) < 20:
         return None
