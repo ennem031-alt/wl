@@ -1,21 +1,22 @@
 """
-AA Trade Evaluator - core logic (v7).
+AA Trade Evaluator - core logic (v8).
 
 Independent of Discord: configuration, text parsing, value list, trade history,
-and the value model.
+and the value model. No external AI or API is used. The "smart" parts are rule-based
+parsing, a local fuzzy name matcher (character trigrams), and learned choices stored
+by the bot.
 
 Key ideas:
-  - Prices come from value_list.txt first. Units that are not listed can get an
-    estimate from community votes, but only when they have enough votes, and the
-    estimate is bounded so it cannot explode.
+  - Prices come from value_list.txt first. Unlisted units can get a bounded estimate
+    from community votes, but only with enough votes.
   - Units can carry stats: "dark mage with sss dmg and sss rng" is the unit "dark mage"
     plus two stat parts. Its value is the sum of the parts.
-  - Filler words ("value", "what", "ano"), stat words alone, and "evo"/"unevo" alone
-    are never units. Chat noise ("overpaying", "or any") is never a unit either.
-  - "evo" and "unevo" are part of the unit name. An evo unit is priced separately.
-  - Typos are corrected only against the value list vocabulary, never against chat.
+  - "evo" and "unevo" are part of the unit name, and "unevo" works before or after the
+    name ("violentine unevo" means "unevo violentine").
+  - Filler words, stat words alone, evo words alone, and chat noise are never units.
+  - Typos are corrected against the value list vocabulary, and close misspellings of
+    known names are matched by a local trigram matcher.
   - Unit-like names that are not priced are logged in pending_units.json for review.
-  - Percent values are stripped from names. They are not used in prices yet.
   - Saves and refits are batched ("dirty" flag).
 """
 
@@ -79,17 +80,19 @@ def load_config():
 BETA = 2.0
 LAM_LIST = 12.0          # anchor strength for value-list units
 LAM_EST = 3.0            # anchor strength for shiny estimates
-LAM_UNLISTED = 1.0       # anchor strength for units that are not listed (votes must work hard)
+LAM_UNLISTED = 1.0       # anchor strength for units that are not listed
 CLAMP_FACTOR = 20.0      # unlisted estimates stay within median / 20 .. median * 20
 ITERATIONS = 30
 HALF_LIFE_DAYS = 60.0
 FAIR_BAND = 0.07
-MIN_VOTES = 3            # votes needed before a unit that is not listed gets a price
+MIN_VOTES = 3            # votes needed before an unlisted unit gets a price
 SHINY_MULT_DEFAULT = 2.0
 TYPO_CUTOFF = 0.8
 TYPO_MARGIN = 0.05
 MIN_TYPO_LEN = 3
 MIN_NAME_LEN = 4         # shortest unit name that is logged as pending
+FUZZY_AUTO = 0.9         # fuzzy match this close is accepted without asking
+FUZZY_MIN = 0.55         # fuzzy match this close is offered as a suggestion
 
 FILLER_WORDS = {
     "what", "whats", "is", "are", "the", "of", "a", "an", "how", "much",
@@ -98,7 +101,7 @@ FILLER_WORDS = {
     "tell", "me", "current", "now",
 }
 
-# Common chat words that are never unit names. Used to keep noise out of pending and votes.
+# Common chat words that are never unit names.
 CHAT_NOISE = {
     "or", "any", "and", "for", "my", "win", "lose", "is", "what", "value",
     "price", "trade", "trading", "tradin", "offer", "offe", "overpaying", "screenshare",
@@ -206,6 +209,9 @@ VOCAB = set()
 FIX_CACHE = {}
 SKIP_TOKENS = {"shiny"} | SKIP_WORDS | EVO_WORDS | RANKS | set(STAT_WORDS) | FILLER_WORDS
 
+NGRAM_INDEX = {}         # trigram -> set of listed canonical names
+NGRAM_SETS = {}          # listed canonical name -> set of trigrams
+
 PENDING = Counter()
 
 
@@ -217,6 +223,42 @@ def build_vocab():
         for t in k.split():
             if t != "shiny" and not t.isdigit():
                 VOCAB.add(t)
+
+
+def trigrams(s):
+    s = f"  {s} "
+    return {s[i:i + 3] for i in range(len(s) - 2)}
+
+
+def build_ngram_index():
+    """Index every listed name by its character trigrams for the local fuzzy matcher."""
+    NGRAM_INDEX.clear()
+    NGRAM_SETS.clear()
+    for name in LIST_VALUE:
+        tg = frozenset(trigrams(name))
+        NGRAM_SETS[name] = tg
+        for t in tg:
+            NGRAM_INDEX.setdefault(t, set()).add(name)
+
+
+def fuzzy_candidates(key, n=3):
+    """
+    Listed names that look most like `key`, by trigram cosine similarity.
+    Returns [(score, canonical), ...], best first. Pure local computation.
+    """
+    q = trigrams(key)
+    if not q:
+        return []
+    hits = Counter()
+    for t in q:
+        for name in NGRAM_INDEX.get(t, ()):
+            hits[name] += 1
+    scored = []
+    for name, c in hits.items():
+        tg = NGRAM_SETS[name]
+        scored.append((c / math.sqrt(len(q) * len(tg)), name))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return scored[:n]
 
 
 def fix_token(tok):
@@ -266,6 +308,7 @@ def load_value_list():
     if not os.path.exists(VALUE_LIST_FILE):
         print(f"[WARN] {VALUE_LIST_FILE} not found. Only community votes will be used.")
         build_vocab()
+        build_ngram_index()
         return
 
     entries = []
@@ -320,6 +363,7 @@ def load_value_list():
         DEFAULT_VALUE = statistics.median(LIST_VALUE.values())
     ALIAS_KEYS = list(ALIAS_MAP.keys())
     build_vocab()
+    build_ngram_index()
     print(f"[OK] Loaded {len(LIST_VALUE)} units from value list (shiny factor x{SHINY_MULT:.2f}).")
 
 
@@ -349,7 +393,7 @@ def is_junk(name):
 def is_unitlike(name):
     """
     A name that could plausibly be a unit. Listed units always pass. Unlisted names must
-    be long enough, short in word count, and free of chat noise and stat or evo words.
+    be long enough, short in word count, and free of chat noise and stat words.
     """
     if not name or is_junk(name):
         return False
@@ -421,7 +465,6 @@ def load_pending():
         with open(PENDING_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         with DATA_LOCK:
-            # Drop noise that older versions may have logged.
             PENDING.update({k: v for k, v in data.items() if is_unitlike(k)})
     except Exception as e:
         print(f"[WARN] Could not read pending_units.json: {e}")
@@ -499,6 +542,16 @@ def is_known_chunk(chunk, lookup=None):
     return is_known(ALIAS_MAP.get(key, key))
 
 
+def move_unevo(words):
+    """
+    'violentine unevo' means 'unevo violentine'. If the part ends with 'unevo' and has
+    other words before it, move 'unevo' to the front so it stays with its unit.
+    """
+    if len(words) >= 2 and words[-1] == "unevo" and words[0] != "unevo":
+        return ["unevo"] + words[:-1]
+    return words
+
+
 def group_by_evo(words):
     """
     'evo' ends a unit and 'unevo' starts a new one:
@@ -571,6 +624,7 @@ def split_items(text, lookup=None):
         p = SHINY_RE.sub(" ", p)
         words = [w for w in fix_typos(norm_key(p, shiny_aware=False)).split()
                  if w not in FILLER_WORDS]
+        words = move_unevo(words)
         shiny_done = False
         for group in group_by_evo(words):
             for kind, chunk in segment(group, lookup):
@@ -615,7 +669,10 @@ def split_sides(text, lookup=None):
 #  RESOLVE ONE QUERY
 # ============================================================
 def resolve_query(raw, choice_lookup=None):
-    """Returns (status, name, options). status: 'ok' | 'ambiguous' | 'unknown'."""
+    """
+    Returns (status, name, options). status: 'ok' | 'ambiguous' | 'unknown'.
+    Order: learned choices, exact aliases, unit with stats, close fuzzy match, then suggestions.
+    """
     key = fix_typos(norm_key(raw))
     if not key:
         return "unknown", None, []
@@ -647,17 +704,38 @@ def resolve_query(raw, choice_lookup=None):
             if is_known(name):
                 return "ok", name, []
 
-    return "unknown", None, suggest(stripped or key)
+    probe = stripped or key
+    fuzzy = fuzzy_candidates(probe)
+    if fuzzy and fuzzy[0][0] >= FUZZY_AUTO:
+        if len(fuzzy) == 1 or fuzzy[0][0] - fuzzy[1][0] >= 0.05:
+            name = fuzzy[0][1]
+            if is_known(name) and not is_junk(name):
+                return "ok", name, []
+
+    return "unknown", None, suggest(probe)
 
 
 def suggest(key, n=4):
+    """Close names first from the local fuzzy matcher, then from shared words and string similarity."""
+    out, seen = [], set()
+
+    for score, cand in fuzzy_candidates(key, n=n * 2):
+        if score < FUZZY_MIN:
+            continue
+        canonical = ALIAS_MAP.get(cand, cand)
+        if canonical in seen or is_junk(canonical):
+            continue
+        seen.add(canonical)
+        out.append((display_name(canonical), canonical))
+        if len(out) >= n:
+            return out
+
     tokens = {t for t in key.split() if t != "shiny"}
     if not tokens:
-        return []
+        return out
     want_shiny = key.endswith(" shiny")
-    pool = set(ALIAS_KEYS)
     scored = []
-    for cand in pool:
+    for cand in ALIAS_KEYS:
         ctoks = {t for t in cand.split() if t != "shiny"}
         overlap = len(tokens & ctoks)
         if not overlap:
@@ -668,7 +746,6 @@ def suggest(key, n=4):
             score += 0.2
         scored.append((score, cand))
     scored.sort(key=lambda x: (-x[0], x[1]))
-    out, seen = [], set()
     for _, cand in scored:
         canonical = ALIAS_MAP.get(cand, cand)
         if canonical in seen or is_junk(canonical):
